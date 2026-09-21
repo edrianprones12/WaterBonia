@@ -171,7 +171,7 @@ SET FOREIGN_KEY_CHECKS = 1;
 -- SAMPLE DATA (development only)
 -- ============================================================
 
--- Administrator (see database/README.md for default credentials)
+-- Administrator (password: Waterbonia@123)
 INSERT INTO `users` (`username`, `email`, `password_hash`, `full_name`, `role`, `status`)
 VALUES (
   'admin_waterbonia',
