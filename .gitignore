@@ -1,0 +1,69 @@
+# ===========================
+# WaterBonia - Git Ignore
+# ===========================
+
+# ── Environment / Secrets ──────────────────────
+.env
+.env.*
+!.env.example
+
+# ── ESP32 Secrets ──────────────────────────────
+esp32/secrets.h
+
+# ── PHP Config (local overrides) ───────────────
+config/local.php
+config/secrets.php
+
+# ── Credentials / Keys ─────────────────────────
+*.pem
+*.key
+*.crt
+credentials.*
+secrets.*
+!secrets.example.h
+secret.*
+password.*
+
+# ── XAMPP / Local Development ──────────────────
+xampp/
+*.log
+php_errorlog
+
+# ── IDE / Editor ───────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+
+# ── OS Files ───────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# ── Temporary / Cache ──────────────────────────
+tmp/
+temp/
+cache/
+sess_*
+
+# ── Vendor (if Composer is used) ───────────────
+vendor/
+composer.lock
+
+# ── Node (if frontend tooling added) ───────────
+node_modules/
+package-lock.json
+
+# ── Test Artifacts ─────────────────────────────
+coverage/
+test-output/
+*.coverage
+
+# ── Database Backups ───────────────────────────
+*.sql.bak
+*.sql.dump
+database/backups/
