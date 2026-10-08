@@ -1,8 +1,15 @@
-# WaterBonia
+# WaterBonia: A Web- and Sensor-Based Automatic Water Dispensing System
 
-**IoT-Based Smart Water Dispenser with Automatic Cup Detection and Web Monitoring**
+WaterBonia is an integrated Internet of Things (IoT) system that combines embedded hardware, a PHP REST API, and a web-based monitoring dashboard to control water dispensing safely and transparently.
 
-WaterBonia is an integrated Internet of Things (IoT) system that combines embedded hardware, a PHP REST API, and a web-based monitoring dashboard to provide real-time water dispensing control and analytics. The system uses ultrasonic and infrared sensors to detect cup placement and hand proximity, automatically activating a water pump only when safe conditions are met.
+The dispensing interaction follows a fixed four-step sequence:
+
+1. **Choose** — the user picks a container (cup or tumbler) on the web dashboard
+2. **Place** — the container-presence sensor confirms the container is on the tray
+3. **Dispense** — the user presses DISPENSE; the request is queued and the ESP32 runs the pump
+4. **Complete** — a load cell measures the dispensed water and the pump auto-stops at the target volume
+
+Hand detection (HC-SR04) is retained for diagnostics only — it is **not** a dispense trigger.
 
 This project is developed as part of **IT 114 - Advanced Human and Computer Interaction**, focusing on user-centered design principles for IoT monitoring interfaces.
 
@@ -12,11 +19,13 @@ This project is developed as part of **IT 114 - Advanced Human and Computer Inte
 
 WaterBonia addresses key concepts in Advanced Human and Computer Interaction:
 
+- **Visible Interaction Sequence** — the dashboard makes the four-step flow (Choose → Place → Dispense → Complete) explicit with a persistent step rail
 - **Dashboard Usability** — Real-time sensor data presented through an intuitive monitoring interface
 - **Information Architecture** — Structured navigation across dashboard, device management, alerts, analytics, and system settings
-- **Feedback Systems** — Immediate visual feedback via RGB LED states, web dashboard updates, and alert notifications
-- **Error Prevention** — Multi-condition pump safety invariant prevents unsafe water dispensing
-- **Status Visibility** — Device online/offline status, water level monitoring, and active alert counts always visible
+- **Feedback Systems** — Immediate visual feedback via RGB LED states, live dashboard polling, progress from measured volume, and alert notifications
+- **Error Prevention** — the DISPENSE button stays disabled until every precondition holds, and a multi-condition pump safety invariant prevents unsafe dispensing
+- **Status Visibility** — Device online/offline status, water level monitoring, container presence, and active alert counts always visible
+- **Single Source of Truth** — target volumes are read from system settings, never hard-coded in the UI
 - **Responsive Interface** — Mobile-friendly sidebar navigation and adaptive layouts
 - **User-Centered Monitoring** — Role-based access (admin/operator/viewer) with appropriate information density per role
 
@@ -26,14 +35,16 @@ See the `docs/` folder for full IT 114 HCI documentation.
 
 ## Key Features
 
-- **Automatic Cup Detection** — IR sensor identifies cup placement before enabling pump
-- **Hand Proximity Detection** — HC-SR04 ultrasonic sensor verifies hand presence
-- **Multi-Condition Safety** — Pump activates only when cup + hand + sufficient water + no faults + no timeout
-- **Real-Time Web Dashboard** — Live sensor readings, water level gauge, dispensing history
+- **Container Selection** — cup (250 mL) or tumbler (500 mL), configured in system settings
+- **Container Presence Sensing** — confirms the container is placed before dispensing can be requested
+- **Measured Auto-Stop** — HX711 load cell measures dispensed water and stops the pump at the target
+- **Command Queue** — the web dashboard queues a request; the ESP32 polls, validates, and executes it
+- **Multi-Condition Safety** — pump runs only with container present, accepted request, sufficient water, valid load-cell samples, and no timeout/fault
+- **Real-Time Web Dashboard** — live container, water level, pump status, and dispense progress
 - **Alert System** — Automatic low-water and device-offline alerts with acknowledgement workflow
 - **Device Management** — Register ESP32 devices, generate/revoke API tokens
 - **Activity Logging** — Comprehensive event logging for all system actions
-- **Analytics** — Charts and reporting for water usage patterns
+- **Analytics** — cup/tumbler session counts, measured-volume totals, and usage charts
 - **RESTful API** — Secure Bearer-token authenticated API for ESP32 communication
 - **Role-Based Access** — Admin, operator, and viewer permission levels
 
@@ -42,23 +53,28 @@ See the `docs/` folder for full IT 114 HCI documentation.
 ## System Architecture
 
 ```
-┌──────────────┐     Wi-Fi      ┌──────────────────┐     HTTP/JSON     ┌─────────────────┐
-│   ESP32      │ ◄────────────► │  PHP REST API    │ ◄──────────────► │  MySQL Database  │
-│  (Sensors)   │                │  (XAMPP Server)  │                   │  (waterbonia)    │
-│  HC-SR04     │                │  api/             │                   │  8 tables        │
-│  IR Sensor   │                │  Bearer Auth      │                   │  InnoDB/utf8mb4  │
-│  Water Level │                │  Rate Limiting    │                   │                  │
-│  Relay/Pump  │                └──────────────────┘                   └─────────────────┘
-│  RGB LED     │                         │
-└──────────────┘                         │ PHP PDO
-                                         ▼
-                                ┌──────────────────┐
-                                │  Web Dashboard   │
-                                │  (HTML/CSS/JS)   │
-                                │  10 pages        │
-                                │  Login/Auth      │
-                                │  Sidebar Nav     │
-                                └──────────────────┘
+        ┌─────────────────────────────────────────────┐
+        │              ESP32 (device)                 │
+        │  container sensor · water level · HX711     │
+        │  load cell · relay/pump · RGB LED           │
+        └───────────────┬─────────────────────────────┘
+                        │  Wi-Fi (Bearer token)
+                        │  • heartbeat / telemetry
+                        │  • poll-command  ◄── dispense request
+                        │  • dispensing start / complete
+                        ▼
+        ┌──────────────────────────────┐      ┌─────────────────┐
+        │  PHP REST API (XAMPP)        │◄────►│  MySQL          │
+        │  api/  · Bearer auth         │ PDO  │  waterbonia     │
+        │  rate limits · command queue │      │  9 tables       │
+        └──────────────┬───────────────┘      └─────────────────┘
+                       │ session auth (CSRF, RBAC)
+                       ▼
+        ┌──────────────────────────────┐
+        │  Web Dashboard (11 pages)    │
+        │  Choose → Place → Dispense   │
+        │  → Complete, with live state │
+        └──────────────────────────────┘
 ```
 
 ---
@@ -69,16 +85,18 @@ The web dashboard provides a complete monitoring and management interface:
 
 | Page | Purpose |
 |------|---------|
-| Dashboard | System overview — water level, pump status, cup/hand detection, alerts |
+| Dashboard | **Dispense flow** — Choose container → Place → Dispense → Complete, plus water level, pump, container and alert overview |
 | Water Level | Detailed water level monitoring with historical data |
-| Dispensing | Dispensing session history with filtering |
+| Dispensing | Active session (target vs measured) and dispensing history |
 | Device Status | Connected device details and sensor readings |
 | Activity Logs | Searchable event log with type/level/date filtering |
 | Alerts | Alert management with acknowledge/resolve workflow |
-| Analytics | Usage charts and reporting |
+| Analytics | Cup/tumbler counts, measured volume, usage charts |
 | Devices | ESP32 device registration and token management |
-| Settings | System configuration (thresholds, timezone, display name) |
+| Settings | System configuration (thresholds, container targets, timezone, display name) |
 | Help / About | Application information |
+
+`pages/dispenser-status.php` is a JSON endpoint polled by the dashboard every 2 seconds for live state.
 
 ### Default Login Credentials
 
@@ -96,24 +114,45 @@ The web dashboard provides a complete monitoring and management interface:
 
 The firmware runs on ESP32 DevKit boards and manages:
 
-- **Sensor reading** — HC-SR04 (hand), IR (cup), analog (water level)
-- **State machine** — INIT → WIFI_CONNECTING → READY → CUP_DETECTED → WAITING_FOR_HAND → DISPENSING
+- **Sensor reading** — container presence (IR/breakbeam), analog water level, HC-SR04 (diagnostic only)
+- **Load cell measurement** — HX711 reading converted to millilitres for auto-stop at target
+- **State machine** — INIT → WIFI_CONNECTING → READY → CONTAINER_DETECTED → WAITING_FOR_COMMAND → DISPENSING → COMPLETE
+- **Command polling** — claims dispense requests queued by the web dashboard
 - **Pump control** — Relay activation with multi-condition safety invariant
-- **API communication** — Heartbeat, telemetry, dispensing sessions
+- **API communication** — Heartbeat, telemetry, command polling, dispensing sessions
 - **Status indication** — RGB LED with color-coded states
 - **NVS provisioning** — Wi-Fi and device token storage
 
 ### State Machine
 
 ```
-INIT → WIFI_CONNECTING → READY → CUP_DETECTED → WAITING_FOR_HAND → DISPENSING
-              ↓                                       ↓                ↓
-            READY ←──────────────────────────────────┘                 ↓
-              ↓                                                        ↓
-         LOW_WATER → READY (when water recovers)     ←────────────────┘
-              ↓
-         ERROR → READY (when sensor recovers)
+INIT → WIFI_CONNECTING → READY
+                          ↓
+              CONTAINER_DETECTED ──(container removed)──► READY
+                          ↓
+               WAITING_FOR_COMMAND ──(container removed)──► READY
+                          ↓  (accepted dispense request + local checks pass)
+                     DISPENSING
+                    ↙          ↘
+        target reached      container removed / low water /
+                    ↓       timeout / load-cell fault
+                 COMPLETE ──────────────────────► READY
+Any state → LOW_WATER → READY (when water recovers)
+Any state → ERROR     → READY (when sensors recovers)
 ```
+
+### Pump Safety Invariant
+
+The pump may be ON **only** when all of these hold:
+
+1. Container detected
+2. An accepted dispense request is active
+3. Water level > `LOCAL_PUMP_CUTOFF_PERCENT` (15%)
+4. Load-cell samples are valid
+5. Dispense timeout (`MAX_DISPENSE_TIME_MS`, 30 s) not exceeded
+6. No emergency stop active
+
+Local checks always win: the website can only *request* dispensing.
 
 See `esp32/README.md` for full firmware documentation.
 
@@ -123,13 +162,17 @@ See `esp32/README.md` for full firmware documentation.
 
 | Component | Model | GPIO | Purpose |
 |-----------|-------|------|---------|
-| Ultrasonic | HC-SR04 | 25 (TRIG), 26 (ECHO) | Hand detection (2–10 cm) |
-| IR Proximity | Generic obstacle sensor | 27 | Cup detection |
+| Container Sensor | IR / breakbeam / limit switch | 27 | Container presence (not type classification) |
+| Load Cell | HX711 + load cell amplifier | 19 (DOUT), 18 (SCK) | Measured dispensed volume — **pins not yet finalized** |
 | Water Level | Analog sensor | 34 (ADC1) | Tank level monitoring |
+| Ultrasonic | HC-SR04 | 25 (TRIG), 26 (ECHO) | Diagnostics only — not a dispense trigger |
 | Pump Relay | 1-channel 5V | 32 | DC pump switching |
 | RGB LED | Common cathode/anode | 14 (R), 12 (G), 13 (B) | Status indication |
 
-> **Note:** HC-SR04 echo pin outputs 5V. Use a voltage divider (1kΩ + 2kΩ) to safely interface with ESP32's 3.3V GPIO.
+> **Notes:**
+> - The container sensor reports *presence only*; cup vs tumbler is chosen on the web dashboard.
+> - HC-SR04 echo pin outputs 5V. Use a voltage divider (1kΩ + 2kΩ) to safely interface with ESP32's 3.3V GPIO.
+> - HX711 GPIO assignments are placeholders and the load cell has **not been calibrated** — dispensing cannot be claimed as physically measured until calibration with a known reference weight is performed.
 
 ---
 
@@ -143,16 +186,19 @@ The API provides secure endpoints for ESP32 device communication.
 |----------|--------|------|---------|
 | `/api/status` | GET | None | API status |
 | `/api/device/heartbeat` | POST | Bearer | Device alive signal |
-| `/api/device/sensor-reading` | POST | Bearer | Telemetry data |
-| `/api/device/dispensing/start` | POST | Bearer | Start session |
-| `/api/device/dispensing/complete` | POST | Bearer | Complete session |
+| `/api/device/sensor-reading` | POST | Bearer | Telemetry (incl. live measured volume) |
+| `/api/device/poll-command` | POST | Bearer | Claim a queued dispense command |
+| `/api/device/command-result` | POST | Bearer | Report command outcome |
+| `/api/device/dispensing/start` | POST | Bearer | Start session (server sets target) |
+| `/api/device/dispensing/complete` | POST | Bearer | Complete session with measured volume |
 
 ### Security Features
 
 - Bearer token authentication (SHA-256 hashed, never stored plaintext)
 - Prepared statements for all database queries
+- Server-authoritative target volume (browser value is never trusted blindly)
+- Command claiming is atomic (transaction + row lock) and TTL-bounded
 - Rate limiting per endpoint
-- CORS headers
 - JSON error responses without PHP leakage
 
 See `api/README.md` for complete API documentation.
@@ -161,17 +207,18 @@ See `api/README.md` for complete API documentation.
 
 ## Database
 
-MySQL database with 8 tables using InnoDB/utf8mb4:
+MySQL database with 9 tables using InnoDB/utf8mb4:
 
 | Table | Purpose |
 |-------|---------|
 | `users` | Web application accounts (admin/operator/viewer) |
 | `devices` | Registered ESP32 dispenser units |
 | `sensor_readings` | Live telemetry from ESP32 sensors |
-| `dispensing_sessions` | Water dispensing operation records |
+| `dispensing_sessions` | Dispensing records (container, target, measured) |
+| `device_commands` | Web → ESP32 dispense command queue |
 | `activity_logs` | System and device event logging |
 | `alerts` | Conditions requiring attention |
-| `system_settings` | Configurable key-value settings |
+| `system_settings` | Configurable key-value settings (incl. container targets) |
 | `device_tokens` | API authentication tokens for ESP32 |
 
 See `database/README.md` for schema details and import instructions.
@@ -215,6 +262,7 @@ See `database/README.md` for schema details and import instructions.
    - Open phpMyAdmin (`http://localhost/phpmyadmin`)
    - Import `database/waterbonia.sql`
    - Import `database/api_migration.sql`
+   - Import `database/dispensing_v2_migration.sql` (container type, target/measured volume, `device_commands` queue)
 
 4. **Access the application:**
    ```
@@ -228,7 +276,10 @@ See `database/README.md` for schema details and import instructions.
 1. Copy `esp32/secrets.example.h` to `esp32/secrets.h`
 2. Fill in your Wi-Fi credentials and device token
 3. Update `API_BASE_URL` in `esp32/src/config.h` with your XAMPP LAN IP
-4. Flash firmware using Arduino IDE or PlatformIO
+4. Install the `HX711_ADC` library (required for measured dispensing)
+5. Confirm the HX711 GPIO pins in `esp32/include/hardware_config.h` (**placeholder — not yet wired**)
+6. Calibrate `LOAD_CELL_CALIBRATION_FACTOR` in `esp32/src/config.h` with a known reference weight
+7. Flash firmware using Arduino IDE or PlatformIO
 
 See `esp32/README.md` for detailed firmware setup instructions.
 
@@ -243,17 +294,20 @@ WaterBonia/
 │
 ├── api/                        # PHP REST API for ESP32
 │   ├── index.php               # API router
+│   ├── .htaccess               # Routes /api/* to the router
 │   ├── bootstrap.php           # API context bootstrap
 │   ├── auth.php                # Device token authentication
 │   ├── heartbeat.php           # Heartbeat endpoint
 │   ├── sensor_reading.php      # Sensor reading + alert logic
 │   ├── dispensing.php          # Dispensing session endpoints
-│   ├── test.php                # API test suite
+│   ├── device_command.php      # Command queue: poll + result
+│   ├── test.php                # API test suite (CLI only)
 │   └── README.md               # API documentation
 │
 ├── assets/
-│   ├── css/style.css           # Main stylesheet
-│   └── js/app.js               # Client-side JavaScript
+│   ├── css/style.css           # Main stylesheet + dispensing flow styles
+│   ├── js/app.js               # Client-side JavaScript
+│   └── js/dispenser.js         # 4-step dispensing flow + polling
 │
 ├── auth/
 │   └── login.php               # Web login page
@@ -264,22 +318,24 @@ WaterBonia/
 ├── database/
 │   ├── waterbonia.sql          # MySQL schema + sample data
 │   ├── api_migration.sql       # device_tokens table + constraints
+│   ├── dispensing_v2_migration.sql  # container/target/measured + command queue
 │   └── README.md               # Database documentation
 │
 ├── esp32/                      # ESP32 firmware
-│   ├── src/                    # Firmware source code
+│   ├── src/                    # Firmware source code (incl. load_cell.*)
 │   ├── include/                # Hardware config
 │   ├── secrets.example.h       # Secrets template (safe to commit)
 │   └── README.md               # Firmware documentation
 │
 ├── includes/
-│   ├── functions.php           # Shared PHP utilities
+│   ├── functions.php           # Shared PHP utilities + dispense helpers
 │   ├── header.php              # Page header + layout
 │   ├── sidebar.php             # Sidebar navigation
 │   └── footer.php              # Layout end
 │
 ├── pages/
-│   ├── dashboard.php           # Main dashboard
+│   ├── dashboard.php           # Dispense flow (Choose → Place → Dispense → Complete)
+│   ├── dispenser-status.php    # JSON endpoint polled by the dashboard
 │   ├── water-level.php         # Water level monitoring
 │   ├── dispensing.php          # Dispensing history
 │   ├── device-status.php       # Device details
@@ -314,16 +370,18 @@ WaterBonia/
 
 | Component | Status |
 |-----------|--------|
-| Database Schema | Complete |
-| Web Dashboard | Complete (10 pages) |
+| Database Schema | Complete (+ v2 migration for container/target/measured and command queue) |
+| Web Dashboard | Complete (10 pages + dispense flow endpoint) |
 | Authentication & RBAC | Complete |
-| PHP REST API | Complete |
-| ESP32 Firmware | Complete (software-verified, not yet tested on physical hardware) |
+| PHP REST API | Complete (incl. command polling) |
+| Dispensing v2 flow | Complete (software-verified end to end: queue → claim → session → measured complete) |
+| ESP32 Firmware | Complete in software — **not yet tested on physical hardware** |
+| HX711 Load Cell | Implemented in software — **pins and calibration not yet finalized** |
 | Alert System | Complete |
 | Activity Logging | Complete |
 | Device Token Management | Complete |
 
-> **Note:** The ESP32 firmware has been software-verified but has not yet been tested on physical hardware. The `TEST_MODE` flag in `config.h` allows local testing without sensors.
+> **Note:** The ESP32 firmware compiles as software only and has **not** been tested on physical hardware. Target volumes recorded during bench simulation are not calibrated measurements. Use `TEST_MODE` in `config.h` for local testing without sensors; `ALLOW_DISPENSE_WITHOUT_LOAD_CELL` must remain `0` in production.
 
 ---
 

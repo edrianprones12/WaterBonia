@@ -13,6 +13,23 @@ $_SERVER['SCRIPT_NAME'] = $_SERVER['SCRIPT_NAME'] ?? '/api';
 // Load database config (defines constants and db())
 require_once __DIR__ . '/../config/database.php';
 
+/* ── Authorization Header Normalisation ───────────────── */
+// Some Apache/mod_php setups do not export the Authorization header to
+// $_SERVER (it is removed from the subprocess environment). Fall back to
+// apache_request_headers() so Bearer token auth works regardless.
+if (empty($_SERVER['HTTP_AUTHORIZATION'])) {
+    if (!empty($_SERVER['REDIRECT_HTTP_AUTHORIZATION'])) {
+        $_SERVER['HTTP_AUTHORIZATION'] = $_SERVER['REDIRECT_HTTP_AUTHORIZATION'];
+    } elseif (function_exists('apache_request_headers')) {
+        foreach (apache_request_headers() as $header_name => $header_value) {
+            if (strcasecmp($header_name, 'Authorization') === 0) {
+                $_SERVER['HTTP_AUTHORIZATION'] = $header_value;
+                break;
+            }
+        }
+    }
+}
+
 /* ── API Response Helpers ─────────────────────────────── */
 
 function api_success(mixed $data = null, string $message = '', int $code = 200): never

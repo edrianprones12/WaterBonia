@@ -22,13 +22,27 @@ require_once __DIR__ . '/auth.php';
 require_once __DIR__ . '/heartbeat.php';
 require_once __DIR__ . '/sensor_reading.php';
 require_once __DIR__ . '/dispensing.php';
+require_once __DIR__ . '/device_command.php';
 
 // ── Parse route ─────────────────────────────────────────
 $uri = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
-$segments = array_values(array_filter(explode('/', $uri)));
+
+// Strip the project base prefix (e.g. "/WaterBonia") so the API works
+// whether it is served from /WaterBonia/api/… or /api/…
+$project_prefix = '/' . basename(dirname(__DIR__));
+if ($project_prefix !== '/' && strpos($uri, $project_prefix) === 0) {
+    $uri = substr($uri, strlen($project_prefix));
+}
+
+$segments = array_values(array_filter(explode('/', $uri), fn($s) => $s !== ''));
 
 // Remove 'api' prefix if present
 if (isset($segments[0]) && $segments[0] === 'api') {
+    array_shift($segments);
+}
+
+// Remove the router filename if rewritten (e.g. /api/index.php/device/…)
+if (isset($segments[0]) && str_ends_with($segments[0], '.php')) {
     array_shift($segments);
 }
 
@@ -39,7 +53,7 @@ $action   = $segments[1] ?? '';
 if ($resource === 'status' && $action === '') {
     api_success([
         'system'    => 'WaterBonia',
-        'version'   => '0.1.0-dev',
+        'version'   => '0.2.0-dev',
         'api_version' => '1.0.0',
         'timestamp' => date('c'),
         'endpoints' => [
@@ -48,6 +62,8 @@ if ($resource === 'status' && $action === '') {
             'sensor_reading'    => 'POST /api/device/sensor-reading',
             'dispensing_start'  => 'POST /api/device/dispensing/start',
             'dispensing_complete'=> 'POST /api/device/dispensing/complete',
+            'poll_command'      => 'POST /api/device/poll-command',
+            'command_result'    => 'POST /api/device/command-result',
         ],
     ]);
 }
@@ -67,11 +83,13 @@ if ($resource === 'device') {
         $route = 'dispensing_' . $segments[2];
     }
 
-    switch ($route) {
+    // Normalize dashes to underscores for matching
+    $route_key = str_replace('-', '_', $route);
+
+    switch ($route_key) {
         case 'heartbeat':
             handle_heartbeat($auth);
             break;
-        case 'sensor-reading':
         case 'sensor_reading':
             handle_sensor_reading($auth);
             break;
@@ -80,6 +98,12 @@ if ($resource === 'device') {
             break;
         case 'dispensing_complete':
             handle_dispensing_complete($auth);
+            break;
+        case 'poll_command':
+            handle_poll_command($auth);
+            break;
+        case 'command_result':
+            handle_command_result($auth);
             break;
         default:
             api_error('Unknown device endpoint: ' . $route, 404);

@@ -37,18 +37,14 @@ function handle_heartbeat(array $auth): void
 
     db_update('devices', $update, 'id = ?', [$device_id]);
 
-    // Log heartbeat sparingly — only log if device was previously offline
-    if ($current && $current['status'] === 'online') {
-        // Device was already online — just log occasionally (every ~5 minutes)
-        $last_log = db_fetch(
-            "SELECT created_at FROM activity_logs WHERE device_id = ? AND event_type = 'device_heartbeat' ORDER BY created_at DESC LIMIT 1",
-            [$device_id]
-        );
-        if (!$last_log || (time() - strtotime($last_log['created_at'])) > 300) {
-            log_event($device_id, null, 'device_heartbeat', 'info', "Heartbeat from {$auth['device_code']}");
-        }
-    } else {
+    if ($current && $current['status'] !== 'online') {
         log_event($device_id, null, 'device_connected', 'info', "Device {$auth['device_code']} came online.");
+
+        // Device reported again — close any open offline alert.
+        db()->prepare(
+            "UPDATE alerts SET status = 'resolved', resolved_at = ?
+              WHERE device_id = ? AND alert_type = 'device_offline' AND status = 'active'"
+        )->execute([date('Y-m-d H:i:s'), $device_id]);
     }
 
     api_success([

@@ -1,14 +1,20 @@
 # WaterBonia ESP32 Firmware
 
-Firmware for the ESP32-based smart water dispenser controller.
+Firmware for the ESP32-based automatic water dispenser controller (**v0.2.0, dispensing v2**).
+
+The firmware executes the four-step HCI flow: it waits for the container to be
+placed, polls the server for a dispense request chosen by the web user, runs the
+pump under a local safety invariant, and auto-stops when the load cell reaches
+the server-authoritative target volume.
 
 ## Hardware List
 
 | Component | Model | Purpose |
 |-----------|-------|---------|
 | Microcontroller | ESP32 DevKit | Main controller |
-| Ultrasonic Sensor | HC-SR04 | Hand detection (2-10 cm range) |
-| IR Proximity Sensor | Generic IR obstacle sensor | Cup detection |
+| Container Sensor | IR / breakbeam / limit switch | Container **presence** only (does not classify cup vs tumbler) |
+| Load Cell + Amplifier | Strain gauge + **HX711** | Measures dispensed water → auto-stop at target |
+| Ultrasonic Sensor | HC-SR04 | **Diagnostics only** — not a dispense trigger |
 | Water Level Sensor | TBD (analog) | Tank water level monitoring |
 | Relay Module | 1-channel 5V relay | Pump switching |
 | Water Pump | 5V/12V DC pump | Water dispensing |
@@ -19,16 +25,22 @@ Firmware for the ESP32-based smart water dispenser controller.
 
 | Component | ESP32 GPIO | Notes |
 |-----------|-----------|-------|
-| HC-SR04 TRIG | GPIO 25 | Output |
+| Container sensor | GPIO 27 | Digital input; active polarity in `config.h` (`CONTAINER_SENSOR_ACTIVE_LOW`) |
+| HX711 DOUT | GPIO 19 | **PLACEHOLDER — not yet wired** |
+| HX711 SCK | GPIO 18 | **PLACEHOLDER — not yet wired** |
+| HC-SR04 TRIG | GPIO 25 | Output (diagnostic) |
 | HC-SR04 ECHO | GPIO 26 | **Use voltage divider** (5V → 3.3V) |
-| Cup IR Sensor | GPIO 27 | Digital input |
 | Water Level Sensor | GPIO 34 | ADC1 (safe with Wi-Fi) |
 | Pump Relay IN | GPIO 32 | Default OFF state |
 | RGB LED Red | GPIO 14 | |
 | RGB LED Green | GPIO 12 | |
 | RGB LED Blue | GPIO 13 | |
 
-**IMPORTANT:** HC-SR04 echo pin outputs 5V. ESP32 GPIO max is 3.3V. Use a voltage divider (e.g. 1kΩ + 2kΩ) to bring echo signal to safe level.
+**IMPORTANT:**
+- HC-SR04 echo pin outputs 5V. ESP32 GPIO max is 3.3V. Use a voltage divider (e.g. 1kΩ + 2kΩ).
+- The HX711 GPIO assignments are **placeholders**. Confirm them against your final
+  schematic before powering hardware, and never claim the load cell as working
+  until it has been calibrated.
 
 ## GPIO Assignments
 
@@ -40,24 +52,29 @@ All pin assignments are in `include/hardware_config.h`. Change pins there — do
 - HTTPClient (built-in)
 - WiFi (built-in)
 - Preferences (built-in for NVS)
+- **HX711_ADC** (or any HX711 library) — required for measured dispensing
 
-No external libraries required for the base firmware.
+The load cell code is guarded with `__has_include(<HX711_ADC.h>)`, so the
+firmware still compiles without the library — but `ALLOW_DISPENSE_WITHOUT_LOAD_CELL`
+is `0`, which means **dispensing will be rejected** without a working load cell.
 
 ## Build & Upload
 
 ### Option A: Arduino IDE
 1. Install Arduino IDE
 2. Add ESP32 board support (Board Manager URL: `https://dl.espressif.com/dl/package_esp32_index.json`)
-3. Select board: "ESP32 Dev Module"
-4. Open all `.cpp` and `.h` files from `src/` and `include/`
-5. Create `secrets.h` from `secrets.example.h` with your credentials
-6. Build and upload
+3. Install the **HX711_ADC** library from the Library Manager
+4. Select board: "ESP32 Dev Module"
+5. Open all `.cpp` and `.h` files from `src/` and `include/`
+6. Create `secrets.h` from `secrets.example.h` with your credentials
+7. Build and upload
 
 ### Option B: PlatformIO
 1. Create `platformio.ini` in `esp32/` root
 2. Set `board = esp32dev`, `framework = arduino`
-3. Copy source files to `src/`
-4. Run `pio run -t upload`
+3. Add `HX711_ADC` to `lib_deps`
+4. Copy source files to `src/`
+5. Run `pio run -t upload`
 
 ## Configuration
 
@@ -66,10 +83,14 @@ All behavior settings are in `src/config.h`:
 - `API_BASE_URL` — **CHANGE THIS** to your XAMPP computer's LAN IP
 - `HEARTBEAT_INTERVAL_MS` — default 30 seconds
 - `TELEMETRY_INTERVAL_MS` — default 5 seconds
-- `HAND_MIN_DISTANCE_CM` / `HAND_MAX_DISTANCE_CM` — detection range
-- `LOCAL_PUMP_CUTOFF_PERCENT` — ESP32 force-stops pump below this (15%)
+- `COMMAND_POLL_INTERVAL_MS` — default 2 seconds (dispense command polling)
+- `CONTAINER_STABLE_MS` — presence must be stable 300 ms before proceeding
+- `LOCAL_PUMP_CUTOFF_PERCENT` — ESP32 force-stops pump at/below this (15%)
 - `SERVER_LOW_WATER_REFERENCE_PERCENT` — server-side warning threshold (20%)
 - `MAX_DISPENSE_TIME_MS` — maximum pump runtime (30 seconds)
+- `DEFAULT_TARGET_ML` / `MAX_TARGET_ML` — **offline fallback only**; the server is authoritative
+- `LOAD_CELL_CALIBRATION_FACTOR` — **placeholder 1.0, not calibrated**
+- `ALLOW_DISPENSE_WITHOUT_LOAD_CELL` — must stay `0` in production
 
 ### Hardware Settings
 All GPIO pins are in `include/hardware_config.h`.
@@ -125,40 +146,67 @@ Tokens are generated from the WaterBonia web dashboard:
 
 **The ESP32 does NOT generate tokens. Tokens come from the server.**
 
+## Dispensing v2 Flow
+
+```
+1. Choose   web user selects cup (250 mL) or tumbler (500 mL)
+2. Place    container sensor confirms presence → LED turns cyan
+3. Dispense web queues a command → ESP32 polls /device/poll-command
+            → claims it → dispenser_request_dispense() runs local checks
+            → dispensing/start opens the session
+            → pump ON, HX711 measures, telemetry reports measured_ml
+4. Complete measured >= target → pump OFF → dispensing/complete
+            → LED flashes white/green → return to READY
+```
+
+- **Container sensor = presence only.** It never classifies cup vs tumbler.
+- **Target volume is decided by the server**, not the browser. The device adopts
+  the `target_amount_ml` returned with the polled command.
+- **Hand detection (HC-SR04) is diagnostic only** — it never triggers dispensing.
+- **The website only requests dispensing.** The ESP32's local safety checks
+  always have the final word.
+
 ## State Machine
 
 ```
-INIT → WIFI_CONNECTING → READY → CUP_DETECTED → WAITING_FOR_HAND → DISPENSING
-              ↓                                       ↓                ↓
-            READY ←──────────────────────────────────┘                 ↓
-              ↓                                                        ↓
-         LOW_WATER → READY (when water recovers)     ←────────────────┘
-              ↓
-         ERROR → READY (when sensor recovers)
+INIT → WIFI_CONNECTING → READY
+                          ↓
+              CONTAINER_DETECTED ──(container removed)──► READY
+                          ↓
+               WAITING_FOR_COMMAND ──(container removed)──► READY
+                          ↓  (accepted dispense request + local checks pass)
+                     DISPENSING
+                    ↙          ↘
+        target reached      container removed / low water /
+                    ↓       timeout / load-cell fault
+                 COMPLETE ──────────────────────► READY
+Any state → LOW_WATER → READY (when water recovers)
+Any state → ERROR     → READY (when sensors recovers)
 ```
 
 | State | LED | Pump | Meaning |
 |-------|-----|------|---------|
 | INIT | Flash Yellow | OFF | Booting |
 | WIFI_CONNECTING | Flash Yellow | OFF | Connecting to Wi-Fi |
-| READY | Red | OFF | Standby, waiting for cup |
-| CUP_DETECTED | Blue | OFF | Cup present, evaluating stability |
-| WAITING_FOR_HAND | Blue | OFF | Cup present, waiting for hand |
-| DISPENSING | Green | ON | Pump active |
-| LOW_WATER | Yellow | OFF | Water level too low |
-| ERROR | Flash Red | OFF | Sensor error |
+| READY | Solid Blue | OFF | No container — waiting for the user to place one |
+| CONTAINER_DETECTED | Solid Cyan | OFF | Container present, stabilising |
+| WAITING_FOR_COMMAND | Solid Cyan | OFF | Container ready — awaiting the web dispense command |
+| DISPENSING | Solid Green | ON | Pump active, load cell measuring toward target |
+| COMPLETE | Flash White/Green | OFF | Target reached — hold, then return to READY |
+| LOW_WATER | Solid Yellow | OFF | Water level too low |
+| ERROR | Flash Red | OFF | Sensor / system fault |
 
 ## Pump Safety Invariant
 
 The pump is permitted to turn ON **only** when ALL of the following are true:
-1. `cup_detected == true`
-2. `hand_detected == true`
+1. Container is detected
+2. A dispense request has been **accepted** (web command or local test trigger)
 3. `water_level > LOCAL_PUMP_CUTOFF_PERCENT` (15%)
-4. No sensor safety fault exists
-5. Dispense timeout not exceeded (30s)
+4. Load-cell samples are valid (see `ALLOW_DISPENSE_WITHOUT_LOAD_CELL`)
+5. Dispense timeout not exceeded (30 s)
 6. Emergency stop is not active
 
-All other conditions require pump OFF.
+Any violation forces pump OFF immediately.
 
 ## Water Level Thresholds
 
@@ -171,14 +219,25 @@ Two distinct thresholds with different purposes:
 
 The ESP32 cutoff is authoritative. The server threshold is advisory.
 
+## Load Cell (HX711)
+
+- Measured weight in grams ≈ millilitres (water density ≈ 1 g/mL).
+- **Tare is performed at the start of every dispensing session.**
+- `LOAD_CELL_SETTLE_MS` / `LOAD_CELL_SAMPLE_MS` gate when a reading is compared
+  against the target; `LOAD_CELL_MIN_VALID_G` guards against tare drift causing
+  an instant completion.
+- If the load cell reports an error or stale data, the pump must not run.
+- **The calibration factor is a placeholder.** Calibrate with a known reference
+  weight before recording any real dispensing volumes.
+
 ## Safety Rules
 
 Pump MUST stop when:
-1. Cup is removed
-2. Hand is removed
-3. Water level below local cutoff (15%)
-4. Max timeout reached (30 seconds)
-5. Sensor error detected
+1. Container is removed
+2. Water level at/below local cutoff (15%)
+3. Max timeout reached (30 seconds)
+4. Load-cell fault / invalid samples detected
+5. Target volume reached
 6. Emergency stop triggered
 
 **Default boot state: PUMP OFF**
@@ -188,7 +247,8 @@ Pump MUST stop when:
 Set `TEST_MODE 1` in `src/config.h` to enable development mode.
 
 ### What Changes in Test Mode
-- Serial commands can simulate sensor states (cup, hand, water level, errors)
+- Serial commands can simulate sensor states (container, hand, water level, errors)
+- A local `DISPENSE` trigger runs the full local safety path without a server command
 - Pump and LED behavior can be verified locally
 - State machine transitions can be tested without hardware sensors
 
@@ -204,25 +264,26 @@ Set `TEST_MODE 1` in `src/config.h` to enable development mode.
 ### Test Mode Serial Commands
 
 ```
-CUP ON        — simulate cup detected
-CUP OFF       — simulate cup removed
-HAND ON       — simulate hand detected
-HAND OFF      — simulate hand removed
-WATER=50      — set simulated water level (0-100)
-SENSOR ERROR  — simulate sensor error
-SENSOR OK     — clear simulated sensor error
-HELP          — show available commands
+CONTAINER ON    — simulate container detected (CUP ON is a legacy alias)
+CONTAINER OFF   — simulate container removed
+HAND ON / OFF   — simulate hand detection (diagnostic only)
+WATER=50        — set simulated water level (0-100)
+DISPENSE        — local dispense trigger (runs all local safety checks)
+DISPENSE=tumbler— local dispense trigger for the tumbler default target
+SENSOR ERROR    — simulate sensor error
+SENSOR OK       — clear simulated sensor error
+HELP            — show available commands
 ```
 
 Example session:
 ```
-[CUP ON]
-[TEST] Simulated cup: DETECTED
-[STATE] READY → CUP_DETECTED → WAITING_FOR_HAND
+[CONTAINER ON]
+[TEST] Simulated container: DETECTED
+[STATE] READY → CONTAINER_DETECTED → WAITING_FOR_COMMAND
 
-[HAND ON]
-[TEST] Simulated hand: DETECTED
-[STATE] WAITING_FOR_HAND → DISPENSING
+[DISPENSE]
+[TEST] Dispense request (cup): ACCEPTED
+[STATE] WAITING_FOR_COMMAND → DISPENSING
 [PUMP] ON
 
 [WATER=10]
@@ -237,21 +298,20 @@ Example session:
 ## Serial Output Format
 
 ```
-[BOOT] WaterBonia ESP32 Firmware v0.1.0
+[BOOT] WaterBonia ESP32 Firmware v0.2.0
 [MODE] TEST MODE - API writes disabled
 [WIFI] Connected. IP: 192.168.1.20
-[SENSOR] Init complete. Pump OFF.
+[DISPENSER] Init complete. Pump OFF.
 [STATE] INIT → READY
-[STATUS] State: READY | Cup: NO | Hand: NO | Water: 72% | Pump: OFF | Wi-Fi: OK
-[SENSOR] Cup: YES
-[STATE] READY → CUP_DETECTED
-[STATE] CUP_DETECTED → WAITING_FOR_HAND
-[SENSOR] Hand: YES
-[PUMP] ON
-[STATE] WAITING_FOR_HAND → DISPENSING
-[API] Session started: #42
+[STATUS] State: READY | Container: NO | Hand: NO | Water: 72% | Pump: OFF | Wi-Fi: OK
+[SENSOR] Container: YES
+[STATE] READY → CONTAINER_DETECTED → WAITING_FOR_COMMAND
+[API] Command #5: dispense cup → 250 mL
+[STATE] WAITING_FOR_COMMAND → DISPENSING
+[API] Session started: #456 (target 250 mL)
+[STATE] DISPENSING → COMPLETE
 [PUMP] OFF
-[API] Session #42 completed
+[API] Session #456 completed: measured 252 mL (target_reached)
 ```
 
 ## Troubleshooting
@@ -259,11 +319,13 @@ Example session:
 | Symptom | Possible Cause | Solution |
 |---------|---------------|----------|
 | Stays in WIFI_CONNECTING | Wrong SSID/password | Re-enter provisioning |
-| Pump won't start | Cup not detected | Check IR sensor wiring |
-| Pump won't start | Hand out of range | Adjust HAND_MIN/MAX in config.h |
-| Pump stops immediately | Low water | Refill tank or check LOCAL_PUMP_CUTOFF_PERCENT |
-| Pump runs indefinitely | Max timeout disabled | Check MAX_DISPENSE_TIME_MS |
+| Never leaves READY | Container sensor not detecting | Check wiring; set `CONTAINER_SENSOR_ACTIVE_LOW` correctly |
+| Stays in WAITING_FOR_COMMAND | No command queued | Press DISPENSE on the dashboard; check device is online |
+| Request rejected: load cell not ready | HX711 missing/uncalibrated | Install HX711 library, check DOUT/SCK wiring |
+| Pump won't start | Water below 15% cutoff | Refill tank or check `LOCAL_PUMP_CUTOFF_PERCENT` |
+| Pump runs then stops early | Tare drift / `LOAD_CELL_MIN_VALID_G` | Recalibrate and re-tare |
+| Pump runs indefinitely | Max timeout disabled | Check `MAX_DISPENSE_TIME_MS` |
 | API errors (401) | Invalid token | Generate new token on web dashboard |
 | API errors (429) | Rate limited | Wait for backoff to expire |
-| LED not working | Wrong common mode | Set RGB_LED_COMMON_ANODE correctly |
+| LED not working | Wrong common mode | Set `RGB_LED_COMMON_ANODE` correctly |
 | Sensor errors | Wiring issue | Check all connections, voltage levels |

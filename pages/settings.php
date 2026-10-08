@@ -20,7 +20,7 @@ if (is_post() && verify_csrf()) {
     $setting_key = $_POST['setting_key'] ?? '';
     $setting_value = $_POST['setting_value'] ?? '';
 
-    $valid_keys = ['system_name','timezone','low_water_threshold','dispensing_timeout_seconds','device_offline_timeout_seconds','default_water_capacity_ml'];
+    $valid_keys = ['system_name','timezone','low_water_threshold','dispensing_timeout_seconds','device_offline_timeout_seconds','default_water_capacity_ml','container_cup_target_ml','container_tumbler_target_ml','dispense_command_ttl_sec'];
 
     if (!in_array($setting_key, $valid_keys)) {
         $error = 'Invalid setting.';
@@ -28,10 +28,21 @@ if (is_post() && verify_csrf()) {
         $error = 'Setting value cannot be empty.';
     } else {
         // Validate numeric settings
-        $numeric_keys = ['low_water_threshold','dispensing_timeout_seconds','device_offline_timeout_seconds','default_water_capacity_ml'];
+        $numeric_keys = ['low_water_threshold','dispensing_timeout_seconds','device_offline_timeout_seconds','default_water_capacity_ml','container_cup_target_ml','container_tumbler_target_ml','dispense_command_ttl_sec'];
+        $error = '';
         if (in_array($setting_key, $numeric_keys) && !is_numeric($setting_value)) {
             $error = 'This setting requires a numeric value.';
-        } else {
+        } elseif ($error === '') {
+            $value = (int)$setting_value;
+            if (in_array($setting_key, ['container_cup_target_ml','container_tumbler_target_ml']) && ($value < 1 || $value > 2000)) {
+                $error = 'Dispense target must be between 1 and 2000 mL.';
+            } elseif ($setting_key === 'dispense_command_ttl_sec' && ($value < 5 || $value > 300)) {
+                $error = 'Command TTL must be between 5 and 300 seconds.';
+            } elseif ($setting_key === 'low_water_threshold' && ($value < 0 || $value > 100)) {
+                $error = 'Low water threshold must be between 0 and 100 percent.';
+            }
+        }
+        if ($error === '') {
             $old_value = get_setting($setting_key);
             db_update('system_settings', ['setting_value' => $setting_value], 'setting_key = ?', [$setting_key]);
             $user = current_user();

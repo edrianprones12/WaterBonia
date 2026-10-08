@@ -1,12 +1,15 @@
 /**
  * WaterBonia ESP32 - Status LED Implementation
  *
- * Color scheme:
- *   RED    = Standby / no cup
- *   BLUE   = Cup detected / waiting for hand
- *   GREEN  = Dispensing
- *   YELLOW = Low water / warning
- *   FLASHING RED = Error
+ * v2 color scheme:
+ *   BLUE                        = ready (no container)
+ *   CYAN                        = container detected / awaiting dispense command
+ *   GREEN                       = dispensing
+ *   WHITE flashing (with green) = dispense complete
+ *   YELLOW                      = low water
+ *   RED flashing                = error
+ *
+ * The LED is an indicator only — it is NOT a safety mechanism.
  */
 
 #include "status_led.h"
@@ -15,6 +18,7 @@
 static bool _led_state = false;        // For flashing
 static unsigned long _last_flash = 0;
 static const unsigned long FLASH_INTERVAL_MS = 250;
+static bool _flash_phase = false;      // For the two-color complete flash
 
 void led_init() {
     pinMode(PIN_LED_RED, OUTPUT);
@@ -58,18 +62,14 @@ void led_update(DispenserState state) {
             break;
 
         case STATE_READY:
-            // Solid red — standby, no cup
-            led_set_color(255, 0, 0);
-            break;
-
-        case STATE_CUP_DETECTED:
-            // Blue — cup detected, evaluating stability
+            // Solid blue — ready, waiting for a container
             led_set_color(0, 0, 255);
             break;
 
-        case STATE_WAITING_FOR_HAND:
-            // Blue — cup present, waiting for hand
-            led_set_color(0, 0, 255);
+        case STATE_CONTAINER_DETECTED:
+        case STATE_WAITING_FOR_COMMAND:
+            // Cyan — container in place, awaiting dispense command
+            led_set_color(0, 255, 255);
             break;
 
         case STATE_DISPENSING:
@@ -77,8 +77,21 @@ void led_update(DispenserState state) {
             led_set_color(0, 255, 0);
             break;
 
+        case STATE_COMPLETE:
+            // Alternating white / green flash — dispensing finished
+            if (millis() - _last_flash >= FLASH_INTERVAL_MS) {
+                _last_flash = millis();
+                _flash_phase = !_flash_phase;
+            }
+            if (_flash_phase) {
+                led_set_color(255, 255, 255); // White
+            } else {
+                led_set_color(0, 255, 0);     // Green
+            }
+            break;
+
         case STATE_LOW_WATER:
-            // Yellow — low water warning
+            // Solid yellow — low water warning
             led_set_color(255, 255, 0);
             break;
 

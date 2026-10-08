@@ -41,7 +41,7 @@ include __DIR__ . '/../includes/header.php';
 ?>
 
 <?php if (!$device): ?>
-<div class="dev-notice"><span>⚠</span><span><strong>Development Mode</strong> No device is registered. Water-level readings will appear once an ESP32 device sends telemetry.</span></div>
+<div class="dev-notice"><span>⚠</span><span><strong>No Device Registered</strong> Water-level readings will appear once an ESP32 device sends telemetry.</span></div>
 <?php endif; ?>
 
 <div class="stats-grid mb-3">

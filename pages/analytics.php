@@ -17,6 +17,20 @@ $dispensing_avg_duration = $device_id
     ? db_fetch("SELECT AVG(duration_seconds) as avg_dur FROM dispensing_sessions WHERE device_id = ? AND duration_seconds IS NOT NULL", [$device_id])
     : null;
 
+// Container-type stats (v2)
+$cups_count = $device_id
+    ? db_count("SELECT COUNT(*) FROM dispensing_sessions WHERE device_id = ? AND container_type = 'cup'", [$device_id])
+    : 0;
+$tumblers_count = $device_id
+    ? db_count("SELECT COUNT(*) FROM dispensing_sessions WHERE device_id = ? AND container_type = 'tumbler'", [$device_id])
+    : 0;
+$volume_stats = $device_id
+    ? db_fetch("SELECT SUM(COALESCE(measured_amount_ml, amount_dispensed_ml)) as total_ml,
+                       AVG(COALESCE(measured_amount_ml, amount_dispensed_ml)) as avg_ml
+                  FROM dispensing_sessions
+                 WHERE device_id = ? AND status = 'completed'", [$device_id])
+    : null;
+
 // Water level stats
 $water_stats = $device_id
     ? db_fetch("SELECT AVG(water_level_percent) as avg_level, MIN(water_level_percent) as min_level, MAX(water_level_percent) as max_level FROM sensor_readings WHERE device_id = ? AND water_level_percent IS NOT NULL", [$device_id])
@@ -45,7 +59,7 @@ include __DIR__ . '/../includes/header.php';
 ?>
 
 <?php if (!$device): ?>
-<div class="dev-notice"><span>⚠</span><span><strong>Development Mode</strong> Analytics will be more meaningful once a device provides data.</span></div>
+<div class="dev-notice"><span>⚠</span><span><strong>No Device Registered</strong> Analytics will be more meaningful once a device provides data.</span></div>
 <?php endif; ?>
 
 <div class="stats-grid mb-3">
@@ -77,6 +91,30 @@ include __DIR__ . '/../includes/header.php';
             <div class="stat-label">Avg. Water Level</div>
             <div class="stat-value"><?= $water_stats && $water_stats['avg_level'] ? round($water_stats['avg_level']) . '%' : '—' ?></div>
             <div class="stat-sub"><?= $water_stats && $water_stats['min_level'] !== null ? $water_stats['min_level'] . '% – ' . $water_stats['max_level'] . '%' : 'No data' ?></div>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon yellow">☕</div>
+        <div class="stat-content">
+            <div class="stat-label">Cup Sessions</div>
+            <div class="stat-value"><?= $cups_count ?></div>
+            <div class="stat-sub">target <?= container_target_ml('cup') ?> mL</div>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon blue">🥤</div>
+        <div class="stat-content">
+            <div class="stat-label">Tumbler Sessions</div>
+            <div class="stat-value"><?= $tumblers_count ?></div>
+            <div class="stat-sub">target <?= container_target_ml('tumbler') ?> mL</div>
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-icon green">⚖</div>
+        <div class="stat-content">
+            <div class="stat-label">Total Measured Volume</div>
+            <div class="stat-value"><?= $volume_stats && $volume_stats['total_ml'] !== null ? number_format((float)$volume_stats['total_ml']) . ' mL' : '—' ?></div>
+            <div class="stat-sub"><?= $volume_stats && $volume_stats['avg_ml'] !== null ? 'avg ' . round((float)$volume_stats['avg_ml']) . ' mL/session' : 'load-cell data' ?></div>
         </div>
     </div>
 </div>

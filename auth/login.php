@@ -1,11 +1,14 @@
 <?php
 /**
- * WaterBonia - Login
+ * WaterBonia - Admin Portal login
+ *
+ * Reached through the Admin Portal entry point /admin/.
+ * The public Execution Portal (/) does not use this screen.
  */
 require_once __DIR__ . '/../includes/functions.php';
 
 if (logged_in()) {
-    redirect('/');
+    redirect('/pages/dashboard.php');
 }
 
 $error = '';
@@ -32,7 +35,7 @@ if (is_post()) {
 
                     db_update('users', ['last_login_at' => date('Y-m-d H:i:s')], 'id = ?', [$user['id']]);
                     log_event(null, $user['id'], 'user_login', 'info', 'User logged in: ' . $user['username']);
-                    redirect('/');
+                    redirect('/pages/dashboard.php');
                 }
             } else {
                 $error = 'Invalid username or password.';
@@ -303,12 +306,12 @@ if (is_post()) {
             <div class="login-logo">
                 <div class="logo-mark">&#x1F4A7;</div>
                 <h1>WATERBONIA</h1>
-                <p>Smart Water Dispenser Monitoring</p>
+                <p>Admin Portal — Smart Water Dispenser Monitoring</p>
             </div>
 
             <div class="login-welcome">
                 <h2>Welcome back</h2>
-                <p>Sign in to continue to WaterBonia</p>
+                <p>Sign in to continue to the WaterBonia Admin Portal</p>
             </div>
 
             <?php if ($error): ?>
@@ -343,7 +346,8 @@ if (is_post()) {
             </form>
 
             <div class="login-footer">
-                WaterBonia IoT Water Dispenser System &copy; <?= date('Y') ?>
+                <a href="<?= base_url('/') ?>" class="login-back">&larr; Back to the Execution Portal</a>
+                <div>WaterBonia IoT Water Dispenser System &copy; <?= date('Y') ?></div>
             </div>
         </div>
     </div>

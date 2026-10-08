@@ -46,6 +46,10 @@ $nav_groups = [
         <?php endforeach; ?>
     </nav>
     <div class="sidebar-footer">
+        <a class="sidebar-portal-link" href="<?= base_url('/pages/dispense.php') ?>">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+            Execution portal
+        </a>
         <span class="version">v0.1.0-dev</span>
     </div>
 </aside>

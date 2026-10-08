@@ -12,8 +12,7 @@ $active_session = null;
 $sessions = [];
 $session_count = 0;
 $latest_reading = null;
-$cup_detected = false;
-$hand_detected = false;
+$container_detected = false;
 $pump_status = false;
 
 if ($device) {
@@ -31,8 +30,8 @@ if ($device) {
         [$device['id']]
     );
     if ($latest_reading) {
-        $cup_detected = (bool)$latest_reading['cup_detected'];
-        $hand_detected = (bool)$latest_reading['hand_detected'];
+        $container_detected = !empty($latest_reading['container_detected'])
+            || !empty($latest_reading['cup_detected']);
         $pump_status = (bool)$latest_reading['pump_status'];
     }
 }
@@ -41,7 +40,7 @@ include __DIR__ . '/../includes/header.php';
 ?>
 
 <?php if (!$device): ?>
-<div class="dev-notice"><span>⚠</span><span><strong>Development Mode</strong> No device is registered. Dispensing data will appear once an ESP32 device begins reporting sessions.</span></div>
+<div class="dev-notice"><span>⚠</span><span><strong>No Device Registered</strong> Dispensing data will appear once an ESP32 device begins reporting sessions.</span></div>
 <?php endif; ?>
 
 <div class="stats-grid mb-3">
@@ -54,17 +53,27 @@ include __DIR__ . '/../includes/header.php';
         </div>
     </div>
     <div class="stat-card">
-        <div class="stat-icon <?= $cup_detected ? 'blue' : 'gray' ?>">☕</div>
+        <div class="stat-icon <?= $container_detected ? 'blue' : 'gray' ?>">🥤</div>
         <div class="stat-content">
-            <div class="stat-label">Cup Detection</div>
-            <div class="stat-value" style="font-size:1.1rem"><?= $cup_detected ? 'Detected' : 'Not Detected' ?></div>
+            <div class="stat-label">Container</div>
+            <div class="stat-value" style="font-size:1.1rem"><?= $container_detected ? 'Detected' : 'Not Detected' ?></div>
+            <div class="stat-sub">presence sensor</div>
         </div>
     </div>
     <div class="stat-card">
-        <div class="stat-icon <?= $hand_detected ? 'yellow' : 'gray' ?>">🖐️</div>
+        <div class="stat-icon blue">⚖</div>
         <div class="stat-content">
-            <div class="stat-label">Hand Detection</div>
-            <div class="stat-value" style="font-size:1.1rem"><?= $hand_detected ? 'Detected' : 'Not Detected' ?></div>
+            <div class="stat-label">Measured (live)</div>
+            <div class="stat-value" style="font-size:1.1rem">
+                <?= $active_session && ($active_session['measured_amount_ml'] ?? null) !== null
+                    ? (int)$active_session['measured_amount_ml'] . ' mL'
+                    : '—' ?>
+            </div>
+            <div class="stat-sub">target
+                <?= $active_session && ($active_session['target_amount_ml'] ?? null) !== null
+                    ? (int)$active_session['target_amount_ml'] . ' mL'
+                    : '—' ?>
+            </div>
         </div>
     </div>
     <div class="stat-card">
@@ -94,8 +103,10 @@ include __DIR__ . '/../includes/header.php';
         <table style="width:100%">
             <tr><td class="text-muted" style="width:35%">Session ID</td><td>#<?= $active_session['id'] ?></td></tr>
             <tr><td class="text-muted">Started At</td><td><?= format_datetime($active_session['started_at']) ?></td></tr>
-            <tr><td class="text-muted">Cup Detected</td><td><?= $active_session['cup_detected'] ? 'Yes' : 'No' ?></td></tr>
-            <tr><td class="text-muted">Hand Detected</td><td><?= $active_session['hand_detected'] ? 'Yes' : 'No' ?></td></tr>
+            <tr><td class="text-muted">Container Type</td><td><?= ($active_session['container_type'] ?? null) ? sanitize(ucfirst($active_session['container_type'])) : '—' ?></td></tr>
+            <tr><td class="text-muted">Container Detected</td><td><?= !empty($active_session['container_detected']) || !empty($active_session['cup_detected']) ? 'Yes' : 'No' ?></td></tr>
+            <tr><td class="text-muted">Target</td><td><?= ($active_session['target_amount_ml'] ?? null) !== null ? (int)$active_session['target_amount_ml'] . ' mL' : '—' ?></td></tr>
+            <tr><td class="text-muted">Measured (load cell)</td><td><?= ($active_session['measured_amount_ml'] ?? null) !== null ? (int)$active_session['measured_amount_ml'] . ' mL' : '0 mL' ?></td></tr>
             <tr><td class="text-muted">Water Level Before</td><td><?= $active_session['water_level_before'] !== null ? $active_session['water_level_before'] . '%' : '—' ?></td></tr>
         </table>
     </div>
@@ -118,11 +129,10 @@ include __DIR__ . '/../includes/header.php';
                         <tr>
                             <th>ID</th>
                             <th>Started</th>
-                            <th>Ended</th>
+                            <th>Container</th>
+                            <th>Target</th>
+                            <th>Measured</th>
                             <th>Duration</th>
-                            <th>Water Before</th>
-                            <th>Water After</th>
-                            <th>Volume</th>
                             <th>Stop Reason</th>
                             <th>Status</th>
                         </tr>
@@ -132,11 +142,12 @@ include __DIR__ . '/../includes/header.php';
                         <tr>
                             <td>#<?= $s['id'] ?></td>
                             <td class="text-sm"><?= format_datetime($s['started_at']) ?></td>
-                            <td class="text-sm"><?= $s['ended_at'] ? format_datetime($s['ended_at']) : '—' ?></td>
+                            <td><?= ($s['container_type'] ?? null) ? sanitize(ucfirst($s['container_type'])) : '—' ?></td>
+                            <td><?= ($s['target_amount_ml'] ?? null) !== null ? (int)$s['target_amount_ml'] . ' mL' : '—' ?></td>
+                            <td><?= ($s['measured_amount_ml'] ?? null) !== null
+                                ? (int)$s['measured_amount_ml'] . ' mL'
+                                : (($s['amount_dispensed_ml'] ?? null) !== null ? (int)$s['amount_dispensed_ml'] . ' mL' : '—') ?></td>
                             <td><?= $s['duration_seconds'] !== null ? $s['duration_seconds'] . 's' : '—' ?></td>
-                            <td><?= $s['water_level_before'] !== null ? $s['water_level_before'] . '%' : '—' ?></td>
-                            <td><?= $s['water_level_after'] !== null ? $s['water_level_after'] . '%' : '—' ?></td>
-                            <td><?= $s['amount_dispensed_ml'] !== null ? $s['amount_dispensed_ml'] . ' ml' : '—' ?></td>
                             <td class="text-sm"><?= $s['stop_reason'] ? ucwords(str_replace('_', ' ', $s['stop_reason'])) : '—' ?></td>
                             <td><?= status_badge($s['status']) ?></td>
                         </tr>

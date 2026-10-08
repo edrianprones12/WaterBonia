@@ -75,7 +75,9 @@ static int http_post(const String &path, const String &json_body, String &respon
     return httpCode;
 }
 
-// ── Internal: Parse JSON field from response ─────────────
+// ── Internal: Minimal JSON field parsing ────────────────
+// Kept dependency-free (no ArduinoJson). Only supports the flat
+// shapes returned by the WaterBonia API.
 
 static long parse_json_long(const String &json, const String &key) {
     int idx = json.indexOf("\"" + key + "\"");
@@ -89,6 +91,35 @@ static long parse_json_long(const String &json, const String &key) {
         numStr += json[idx++];
     }
     return numStr.toInt();
+}
+
+static bool parse_json_string(const String &json, const String &key, char *out, size_t out_len) {
+    int idx = json.indexOf("\"" + key + "\"");
+    if (idx < 0) return false;
+    idx = json.indexOf(":", idx);
+    if (idx < 0) return false;
+    idx = json.indexOf("\"", idx);   // opening quote of the value
+    if (idx < 0) return false;
+    idx++;
+    int end = json.indexOf("\"", idx);
+    if (end < 0) return false;
+
+    int len = end - idx;
+    if (len <= 0) return false;
+    if ((size_t)len >= out_len) len = out_len - 1;
+    json.substring(idx, idx + len).toCharArray(out, len + 1);
+    return true;
+}
+
+// True when a JSON key holds an explicit null (e.g. "command":null)
+static bool json_value_is_null(const String &json, const String &key) {
+    int idx = json.indexOf("\"" + key + "\"");
+    if (idx < 0) return false;
+    idx = json.indexOf(":", idx);
+    if (idx < 0) return false;
+    idx++;
+    while (idx < (int)json.length() && (json[idx] == ' ' || json[idx] == '\n' || json[idx] == '\r' || json[idx] == '\t')) idx++;
+    return json.substring(idx, idx + 4) == "null";
 }
 
 // ── Heartbeat ────────────────────────────────────────────
@@ -125,19 +156,24 @@ bool api_send_heartbeat(const String &firmware_version,
 // ── Sensor Reading ───────────────────────────────────────
 
 bool api_send_sensor_reading(int water_level_percent,
-                             bool cup_detected,
+                             bool container_detected,
                              bool hand_detected,
                              bool pump_status,
-                             int battery_percent) {
+                             int battery_percent,
+                             int measured_ml) {
     String body = "{";
     body += "\"water_level_percent\":" + String(water_level_percent) + ",";
-    body += "\"cup_detected\":" + String(cup_detected ? "true" : "false") + ",";
+    body += "\"container_detected\":" + String(container_detected ? "true" : "false") + ",";
+    body += "\"cup_detected\":" + String(container_detected ? "true" : "false") + ",";
     body += "\"hand_detected\":" + String(hand_detected ? "true" : "false") + ",";
-    body += "\"pump_status\":" + String(pump_status ? "true" : "false");
+    body += "\"pump_status\":" + String(pump_status ? "true" : "false") + ",";
+    if (measured_ml >= 0) {
+        body += "\"measured_ml\":" + String(measured_ml) + ",";
+    }
     if (battery_percent >= 0) {
-        body += ",\"battery_percent\":" + String(battery_percent);
+        body += "\"battery_percent\":" + String(battery_percent);
     } else {
-        body += ",\"battery_percent\":null";
+        body += "\"battery_percent\":null";
     }
     body += "}";
 
@@ -164,15 +200,79 @@ bool api_send_sensor_reading(int water_level_percent,
     return false;
 }
 
+// ── Command Polling ──────────────────────────────────────
+
+bool api_poll_command(DispenseCommand &cmd) {
+    String response;
+    int code = http_post("/device/poll-command", "{}", response);
+
+    if (code == -2) return false;   // backoff
+    if (code == -1) return false;   // no Wi-Fi
+
+    if (code == 401) {
+        Serial.println("[API] Token rejected (401) while polling.");
+        _in_backoff = true;
+        _backoff_until = millis() + 300000;
+        return false;
+    }
+
+    if (code < 200 || code >= 300) {
+        Serial.printf("[API] Command poll failed: %d\n", code);
+        return false;
+    }
+
+    // "command":null → nothing to do
+    if (json_value_is_null(response, "command")) {
+        return false;
+    }
+
+    cmd.command_id = parse_json_long(response, "command_id");
+    cmd.target_amount_ml = (int)parse_json_long(response, "target_amount_ml");
+    cmd.container_type[0] = '\0';
+    parse_json_string(response, "container_type", cmd.container_type, sizeof(cmd.container_type));
+
+    if (cmd.command_id <= 0 || cmd.target_amount_ml <= 0 || cmd.container_type[0] == '\0') {
+        Serial.println("[API] Malformed command payload — ignoring.");
+        return false;
+    }
+
+    Serial.printf("[API] Command #%ld: dispense %d mL (%s)\n",
+                  cmd.command_id, cmd.target_amount_ml, cmd.container_type);
+    return true;
+}
+
+bool api_command_result(long command_id,
+                        const String &result,
+                        long session_id,
+                        const String &reason) {
+    if (command_id <= 0) return false;
+
+    String body = "{";
+    body += "\"command_id\":" + String(command_id) + ",";
+    body += "\"result\":\"" + result + "\",";
+    body += "\"session_id\":" + String(session_id) + ",";
+    body += "\"reason\":\"" + reason + "\"";
+    body += "}";
+
+    String response;
+    int code = http_post("/device/command-result", body, response);
+    return (code >= 200 && code < 300);
+}
+
 // ── Dispensing Start ─────────────────────────────────────
 
-long api_dispensing_start(bool cup_detected,
-                          bool hand_detected,
-                          int water_level_before) {
+long api_dispensing_start(bool container_detected,
+                          int water_level_before,
+                          const String &container_type,
+                          long command_id,
+                          int &target_ml) {
     String body = "{";
-    body += "\"cup_detected\":" + String(cup_detected ? "true" : "false") + ",";
-    body += "\"hand_detected\":" + String(hand_detected ? "true" : "false") + ",";
-    body += "\"water_level_before\":" + String(water_level_before);
+    body += "\"container_detected\":" + String(container_detected ? "true" : "false") + ",";
+    body += "\"cup_detected\":" + String(container_detected ? "true" : "false") + ",";
+    body += "\"container_type\":\"" + container_type + "\",";
+    body += "\"target_amount_ml\":" + String(target_ml) + ",";
+    body += "\"water_level_before\":" + String(water_level_before) + ",";
+    body += "\"command_id\":" + String(command_id);
     body += "}";
 
     String response;
@@ -182,6 +282,13 @@ long api_dispensing_start(bool cup_detected,
         long session_id = parse_json_long(response, "session_id");
         if (session_id > 0) {
             Serial.printf("[API] Session started: #%ld\n", session_id);
+
+            // Adopt the server's authoritative target when provided.
+            long server_target = parse_json_long(response, "target_amount_ml");
+            if (server_target > 0 && server_target <= MAX_TARGET_ML) {
+                target_ml = (int)server_target;
+                Serial.printf("[API] Server target adopted: %d mL\n", target_ml);
+            }
             return session_id;
         }
     }
@@ -199,7 +306,8 @@ long api_dispensing_start(bool cup_detected,
 
 bool api_dispensing_complete(long session_id,
                              int water_level_after,
-                             const String &stop_reason) {
+                             const String &stop_reason,
+                             int measured_ml) {
     if (session_id <= 0) {
         // No valid session to complete
         Serial.println("[API] No valid session ID. Skipping complete.");
@@ -210,7 +318,8 @@ bool api_dispensing_complete(long session_id,
     body += "\"session_id\":" + String(session_id) + ",";
     body += "\"water_level_after\":" + String(water_level_after) + ",";
     body += "\"stop_reason\":\"" + stop_reason + "\",";
-    body += "\"amount_dispensed_ml\":null";
+    body += "\"measured_amount_ml\":" + String(measured_ml) + ",";
+    body += "\"amount_dispensed_ml\":" + String(measured_ml);
     body += "}";
 
     String response;

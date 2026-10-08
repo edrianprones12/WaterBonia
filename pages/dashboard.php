@@ -1,6 +1,10 @@
 <?php
 /**
- * WaterBonia - Dashboard
+ * WaterBonia - ADMIN PORTAL / Dashboard (system management experience)
+ *
+ * Monitoring and operational overview only. The end-user dispensing
+ * workflow (Choose → Place → Dispense → Complete) lives in the separate
+ * Execution Portal: /pages/dispense.php
  */
 require_once __DIR__ . '/../includes/functions.php';
 require_login();
@@ -8,11 +12,14 @@ require_login();
 $page_title = 'Dashboard';
 $device = get_active_device();
 
-// Live sensor data from device
+// ── Flash message ──────────────────────────────────────
+$flash = $_SESSION['flash'] ?? null;
+unset($_SESSION['flash']);
+
+// ── Live sensor data ───────────────────────────────────
 $latest_reading = null;
 $water_level = null;
-$cup_detected = false;
-$hand_detected = false;
+$container_detected = false;
 $pump_status = false;
 
 if ($device) {
@@ -22,11 +29,19 @@ if ($device) {
     );
     if ($latest_reading) {
         $water_level = $latest_reading['water_level_percent'];
-        $cup_detected = (bool)$latest_reading['cup_detected'];
-        $hand_detected = (bool)$latest_reading['hand_detected'];
+        $container_detected = !empty($latest_reading['container_detected'])
+            || !empty($latest_reading['cup_detected']);
         $pump_status = (bool)$latest_reading['pump_status'];
     }
 }
+
+// ── Dispenser state (read-only monitoring) ─────────────
+$live = get_live_dispenser_state($device);
+$availability = dispenser_availability($device, $live);
+
+// Demo Mode is announced, never simulated: the admin portal reports
+// real system state and only labels the presentation as a demo.
+$demo = WATERBONIA_DEMO_MODE;
 
 // Today's dispensing count
 $today = date('Y-m-d');
@@ -51,10 +66,22 @@ $recent_sessions = $device
 include __DIR__ . '/../includes/header.php';
 ?>
 
+<?php if ($demo): ?>
+<!-- Demo Mode label only — the Admin Portal is not an execution simulator -->
+<div class="demo-banner mb-3" id="demo-banner">
+    <span class="demo-banner-icon" aria-hidden="true">◈</span>
+    <span class="demo-banner-body">
+        <strong>DEMO MODE</strong>
+        <span>Simulation — No physical hardware connected</span>
+    </span>
+    <span class="demo-banner-tag">Presentation</span>
+</div>
+<?php endif; ?>
+
 <?php if (!$device): ?>
 <div class="dev-notice">
     <span>⚠</span>
-    <span><strong>Development Mode</strong> No device is registered. Register an ESP32 device in the Devices page to begin receiving live data.</span>
+    <span><strong>No Device Registered</strong> Register an ESP32 device in the Devices page to begin receiving live data.</span>
 </div>
 <?php elseif (!$latest_reading): ?>
 <div class="dev-notice">
@@ -62,6 +89,32 @@ include __DIR__ . '/../includes/header.php';
     <span><strong>No Sensor Data</strong> Device "<?= sanitize($device['device_name']) ?>" has not sent any sensor readings yet.</span>
 </div>
 <?php endif; ?>
+
+<?php if ($flash): ?>
+<div class="dev-notice" style="border-left-color:<?= $flash['ok'] ? '#22c55e' : '#ef4444' ?>">
+    <span><?= $flash['ok'] ? '✓' : '✕' ?></span>
+    <span><?= sanitize($flash['msg']) ?></span>
+</div>
+<?php endif; ?>
+
+<!-- ══════════ System overview bar ══════════ -->
+<div class="status-row mb-3">
+    <div class="status-row-left">
+        <span class="side-eyebrow">SYSTEM OVERVIEW</span>
+        <span class="status-pill is-<?= sanitize($availability['tone']) ?>"
+              id="status-pill" title="<?= sanitize($availability['hint']) ?>">
+            <span class="pill-dot"></span>
+            <span id="status-pill-label"><?= sanitize($availability['label']) ?></span>
+        </span>
+        <span class="text-sm text-muted">
+            <?= $device ? sanitize($device['device_name']) . ' · last seen ' . time_ago($device['last_seen_at']) : 'No device registered' ?>
+        </span>
+    </div>
+    <div class="status-row-right">
+        <a class="btn btn-outline btn-portal" href="<?= base_url('/pages/dispense.php') ?>">Open Execution Portal</a>
+        <a class="btn btn-outline btn-portal" href="<?= base_url('/pages/dispensing.php') ?>">Dispensing history</a>
+    </div>
+</div>
 
 <!-- Summary Stats -->
 <div class="stats-grid">
@@ -86,8 +139,7 @@ include __DIR__ . '/../includes/header.php';
             <div class="stat-sub"><?php
                 if ($water_level !== null) {
                     $cls = water_level_class($water_level);
-                    $label = $cls === 'water-normal' ? 'Normal' : ($cls === 'water-low' ? 'Low' : 'Critical');
-                    echo $label;
+                    echo $cls === 'water-normal' ? 'Normal' : ($cls === 'water-low' ? 'Low' : 'Critical');
                 } else {
                     echo 'No data';
                 }
@@ -107,20 +159,11 @@ include __DIR__ . '/../includes/header.php';
     </div>
 
     <div class="stat-card">
-        <div class="stat-icon <?= $cup_detected ? 'blue' : 'gray' ?>">☕</div>
+        <div class="stat-icon <?= $container_detected ? 'blue' : 'gray' ?>">🥤</div>
         <div class="stat-content">
-            <div class="stat-label">Cup Status</div>
-            <div class="stat-value" style="font-size:1.1rem"><?= $cup_detected ? 'Detected' : 'Not Detected' ?></div>
-            <div class="stat-sub"><?= $cup_detected ? 'Cup is in position' : 'No cup detected' ?></div>
-        </div>
-    </div>
-
-    <div class="stat-card">
-        <div class="stat-icon <?= $hand_detected ? 'yellow' : 'gray' ?>">🖐️</div>
-        <div class="stat-content">
-            <div class="stat-label">Hand Detection</div>
-            <div class="stat-value" style="font-size:1.1rem"><?= $hand_detected ? 'Detected' : 'Not Detected' ?></div>
-            <div class="stat-sub"><?= $hand_detected ? 'Hand detected' : 'No hand detected' ?></div>
+            <div class="stat-label">Container</div>
+            <div class="stat-value" style="font-size:1.1rem"><?= $container_detected ? 'Detected' : 'None' ?></div>
+            <div class="stat-sub"><?= $container_detected ? 'Container in position' : 'No container detected' ?></div>
         </div>
     </div>
 
@@ -302,10 +345,10 @@ include __DIR__ . '/../includes/header.php';
                 <thead>
                     <tr>
                         <th>Started</th>
+                        <th>Container</th>
+                        <th>Target</th>
+                        <th>Measured</th>
                         <th>Duration</th>
-                        <th>Water Before</th>
-                        <th>Water After</th>
-                        <th>Volume</th>
                         <th>Stop Reason</th>
                         <th>Status</th>
                     </tr>
@@ -314,10 +357,12 @@ include __DIR__ . '/../includes/header.php';
                     <?php foreach ($recent_sessions as $s): ?>
                     <tr>
                         <td class="text-sm"><?= format_datetime($s['started_at']) ?></td>
+                        <td><?= ($s['container_type'] ?? null) ? sanitize(ucfirst($s['container_type'])) : '—' ?></td>
+                        <td><?= ($s['target_amount_ml'] ?? null) !== null ? (int)$s['target_amount_ml'] . ' mL' : '—' ?></td>
+                        <td><?= (($s['measured_amount_ml'] ?? null)) !== null
+                            ? (int)$s['measured_amount_ml'] . ' mL'
+                            : (($s['amount_dispensed_ml'] ?? null) !== null ? (int)$s['amount_dispensed_ml'] . ' mL' : '—') ?></td>
                         <td><?= $s['duration_seconds'] !== null ? $s['duration_seconds'] . 's' : '—' ?></td>
-                        <td><?= $s['water_level_before'] !== null ? $s['water_level_before'] . '%' : '—' ?></td>
-                        <td><?= $s['water_level_after'] !== null ? $s['water_level_after'] . '%' : '—' ?></td>
-                        <td><?= $s['amount_dispensed_ml'] !== null ? $s['amount_dispensed_ml'] . ' ml' : '—' ?></td>
                         <td class="text-sm"><?= $s['stop_reason'] ? ucwords(str_replace('_', ' ', $s['stop_reason'])) : '—' ?></td>
                         <td><?= status_badge($s['status']) ?></td>
                     </tr>

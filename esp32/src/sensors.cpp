@@ -5,6 +5,10 @@
  * Current implementation: analog water-level sensor on ADC pin.
  * To use a different sensor model, replace the functions below.
  *
+ * v2: the container sensor reports PRESENCE ONLY. It does not
+ *     distinguish a cup from a tumbler — the web user chooses the
+ *     container type, and the server authorises the target volume.
+ *
  * TEST_MODE: When TEST_MODE=1, sensors_read_* functions return
  * simulated values set via main.cpp serial commands instead of
  * reading real hardware. This allows state machine and pump/LED
@@ -20,35 +24,36 @@
 
 static bool _hand_stable = false;
 static int _hand_count = 0;
-static bool _cup_stable = false;
-static int _cup_count = 0;
+static bool _container_stable = false;
+static int _container_count = 0;
 static bool _sensor_error = false;
 
 // ── Test Mode Simulation State ───────────────────────────
 // These are set externally by main.cpp when TEST_MODE=1.
 // They are NOT used in normal (TEST_MODE=0) operation.
 #if TEST_MODE
-static bool _sim_cup = false;
+static bool _sim_container = false;
 static bool _sim_hand = false;
 static int  _sim_water_level = 50;
 static bool _sim_error = false;
 
-void sensors_set_sim_cup(bool detected)     { _sim_cup = detected; }
-void sensors_set_sim_hand(bool detected)    { _sim_hand = detected; }
-void sensors_set_sim_water_level(int pct)   { _sim_water_level = constrain(pct, 0, 100); }
-void sensors_set_sim_error(bool error)      { _sim_error = error; }
+void sensors_set_sim_container(bool detected)  { _sim_container = detected; }
+void sensors_set_sim_cup(bool detected)        { _sim_container = detected; }
+void sensors_set_sim_hand(bool detected)       { _sim_hand = detected; }
+void sensors_set_sim_water_level(int pct)      { _sim_water_level = constrain(pct, 0, 100); }
+void sensors_set_sim_error(bool error)         { _sim_error = error; }
 #endif
 
-// ── HC-SR04 Ultrasonic (Hand Detection) ──────────────────
+// ── Init ─────────────────────────────────────────────────
 
 void sensors_init() {
-    // HC-SR04
+    // HC-SR04 (diagnostic only)
     pinMode(PIN_HCSR04_TRIG, OUTPUT);
     pinMode(PIN_HCSR04_ECHO, INPUT);
     digitalWrite(PIN_HCSR04_TRIG, LOW);
 
-    // Cup sensor
-    pinMode(PIN_CUP_SENSOR, INPUT);
+    // Container presence sensor
+    pinMode(PIN_CONTAINER_SENSOR, INPUT);
 
     // Water level analog
     // ESP32 ADC pins don't need explicit pinMode for analogRead
@@ -68,12 +73,14 @@ void sensors_init() {
 
     _hand_stable = false;
     _hand_count = 0;
-    _cup_stable = false;
-    _cup_count = 0;
+    _container_stable = false;
+    _container_count = 0;
     _sensor_error = false;
 
     Serial.println("[SENSOR] Init complete. Pump OFF.");
 }
+
+// ── HC-SR04 Ultrasonic (diagnostic / optional) ──────────
 
 float sensors_read_distance_cm() {
     // Send 10µs trigger pulse
@@ -104,8 +111,7 @@ float sensors_read_distance_cm() {
 bool sensors_read_hand() {
     #if TEST_MODE
     return _sim_hand;
-    #endif
-
+    #else
     float distance = sensors_read_distance_cm();
 
     bool detected = false;
@@ -127,19 +133,20 @@ bool sensors_read_hand() {
     }
 
     return _hand_stable;
+    #endif
 }
 
-// ── IR Sensor (Cup Detection) ───────────────────────────
+// ── Container Presence Sensor ───────────────────────────
+// Presence ONLY — cup vs tumbler is chosen by the web user.
 
-bool sensors_read_cup() {
+bool sensors_read_container() {
     #if TEST_MODE
-    return _sim_cup;
-    #endif
-
-    int raw = digitalRead(PIN_CUP_SENSOR);
+    return _sim_container;
+    #else
+    int raw = digitalRead(PIN_CONTAINER_SENSOR);
 
     bool detected;
-    #if CUP_SENSOR_ACTIVE_LOW
+    #if CONTAINER_SENSOR_ACTIVE_LOW
         detected = (raw == LOW);
     #else
         detected = (raw == HIGH);
@@ -147,18 +154,23 @@ bool sensors_read_cup() {
 
     // Debounce
     if (detected) {
-        _cup_count = min(_cup_count + 1, SENSOR_DEBOUNCE_COUNT);
+        _container_count = min(_container_count + 1, SENSOR_DEBOUNCE_COUNT);
     } else {
-        _cup_count = max(_cup_count - 1, 0);
+        _container_count = max(_container_count - 1, 0);
     }
 
-    if (_cup_count >= SENSOR_DEBOUNCE_COUNT) {
-        _cup_stable = true;
-    } else if (_cup_count <= 0) {
-        _cup_stable = false;
+    if (_container_count >= SENSOR_DEBOUNCE_COUNT) {
+        _container_stable = true;
+    } else if (_container_count <= 0) {
+        _container_stable = false;
     }
 
-    return _cup_stable;
+    return _container_stable;
+    #endif
+}
+
+bool sensors_read_cup() {
+    return sensors_read_container();
 }
 
 // ── Water Level Sensor ───────────────────────────────────
@@ -174,8 +186,7 @@ bool sensors_read_cup() {
 int sensors_read_water_level() {
     #if TEST_MODE
     return _sim_water_level;
-    #endif
-
+    #else
     int raw = analogRead(PIN_WATER_LEVEL_ANALOG);
 
     // Validate ADC reading
@@ -192,6 +203,7 @@ int sensors_read_water_level() {
     percent = constrain(percent, 0, 100);
 
     return percent;
+    #endif
 }
 
 // ── Error State ──────────────────────────────────────────
@@ -199,14 +211,13 @@ int sensors_read_water_level() {
 bool sensors_has_error() {
     #if TEST_MODE
     return _sim_error;
-    #endif
-
-    // Also check if distance reading is stuck (sensor hardware issue)
-    float dist = sensors_read_distance_cm();
-    if (dist < 0) {
+    #else
+    int water = sensors_read_water_level();
+    if (water < 0) {
         _sensor_error = true;
     }
     return _sensor_error;
+    #endif
 }
 
 void sensors_clear_error() {

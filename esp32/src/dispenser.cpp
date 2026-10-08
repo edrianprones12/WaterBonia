@@ -5,23 +5,30 @@
  * - Pump OFF is the default and safe state
  * - Local sensors control pump, not the server
  * - Non-blocking timing throughout
- * - Sensor errors force pump OFF
+ * - Sensor errors and load-cell faults force pump OFF
+ *
+ * v2: dispensing is measured with a load cell and stops at the
+ * target volume. The website only REQUESTS dispensing — the local
+ * validation below always has the final say.
  *
  * PUMP SAFETY INVARIANT (must hold at ALL times):
  *   Pump ON is permitted ONLY when:
- *     cup_detected == true
- *     AND hand_detected == true
+ *     container_detected == true
+ *     AND an accepted dispense request is active
  *     AND water_level > LOCAL_PUMP_CUTOFF_PERCENT
- *     AND no sensor safety fault exists
+ *     AND load cell samples are valid (see ALLOW_DISPENSE_WITHOUT_LOAD_CELL)
  *     AND dispense timeout has not been exceeded
- *     AND emergency stop is not active
+ *     AND no emergency stop is active
  *   All other conditions require Pump OFF.
  */
 
 #include "dispenser.h"
 #include "sensors.h"
+#include "load_cell.h"
 #include "api_client.h"
 #include "hardware_config.h"
+
+#include <string.h>
 
 // ── State ────────────────────────────────────────────────
 
@@ -29,7 +36,7 @@ static DispenserState _state = STATE_INIT;
 static DispenserState _prev_state = STATE_INIT;
 
 // Sensor readings (latest)
-static bool _cup = false;
+static bool _container = false;
 static bool _hand = false;
 static int  _water_level = -1;
 
@@ -37,8 +44,24 @@ static int  _water_level = -1;
 static bool _pump_on = false;
 static unsigned long _pump_start_ms = 0;
 
+// Pending request (from server command or local trigger)
+static bool _pending_request = false;
+static char _pending_container[12] = "";
+static int  _pending_target_ml = 0;
+static long _pending_command_id = 0;
+
+// Active dispense
+static bool  _active = false;
+static char  _active_container[12] = "";
+static int   _target_ml = 0;
+static long  _command_id = 0;
+static int   _measured_ml = 0;
+static bool  _load_cell_valid = false;
+
 // Timing
 static unsigned long _last_state_change = 0;
+static unsigned long _container_since = 0;
+static unsigned long _complete_since = 0;
 
 // API session tracking
 static long _active_session_id = 0;
@@ -79,9 +102,50 @@ static void set_state(DispenserState new_state) {
     _prev_state = _state;
     _state = new_state;
     _last_state_change = millis();
-    Serial.printf("[STATE] %s → %s\n",
+    Serial.printf("[STATE] %s -> %s\n",
                   dispenser_state_name(_prev_state),
                   dispenser_state_name(new_state));
+}
+
+static void reset_request() {
+    _pending_request = false;
+    _pending_container[0] = '\0';
+    _pending_target_ml = 0;
+    _pending_command_id = 0;
+
+    _active = false;
+    _active_container[0] = '\0';
+    _target_ml = 0;
+    _command_id = 0;
+    _measured_ml = 0;
+    _load_cell_valid = false;
+}
+
+// ── Session / Command reporting ──────────────────────────
+// All API writes are compiled out in TEST_MODE unless
+// ENABLE_API_TEST_REQUESTS is explicitly set.
+
+static void finish_session(const char *stop_reason) {
+    int measured = _measured_ml;
+    int water = _water_level >= 0 ? _water_level : 0;
+
+    pump_off();
+
+    #if !TEST_MODE || ENABLE_API_TEST_REQUESTS
+    if (_active_session_id > 0) {
+        api_dispensing_complete(_active_session_id, water, stop_reason, measured);
+    }
+    if (_command_id > 0) {
+        // 'completed' only on target reached; everything else is a local stop.
+        const char *result = (strcmp(stop_reason, "target_reached") == 0) ? "completed" : "rejected";
+        api_command_result(_command_id, result, _active_session_id, stop_reason);
+    }
+    #else
+    Serial.printf("[API] Test mode — session complete skipped (%s).\n", stop_reason);
+    #endif
+
+    _active_session_id = 0;
+    reset_request();
 }
 
 // ── Init ─────────────────────────────────────────────────
@@ -90,32 +154,78 @@ void dispenser_init() {
     pump_off(); // CRITICAL: default safe state
     _state = STATE_INIT;
     _prev_state = STATE_INIT;
-    _cup = false;
+    _container = false;
     _hand = false;
     _water_level = -1;
     _active_session_id = 0;
+    reset_request();
+    load_cell_begin();
     Serial.println("[DISPENSER] Init complete. Pump OFF.");
+}
+
+// ── Request Entry Point ──────────────────────────────────
+
+bool dispenser_request_dispense(const char *container_type, int target_ml, long command_id) {
+    if (_pump_on || _active || _state == STATE_DISPENSING) {
+        Serial.println("[DISPENSER] Request rejected: dispensing already in progress.");
+        return false;
+    }
+    if (_state == STATE_LOW_WATER || _state == STATE_ERROR) {
+        Serial.printf("[DISPENSER] Request rejected: state is %s.\n",
+                      dispenser_state_name(_state));
+        return false;
+    }
+    if (!_container) {
+        Serial.println("[DISPENSER] Request rejected: no container detected.");
+        return false;
+    }
+    if (container_type == NULL || container_type[0] == '\0') {
+        Serial.println("[DISPENSER] Request rejected: missing container type.");
+        return false;
+    }
+    if (target_ml <= 0 || target_ml > MAX_TARGET_ML) {
+        Serial.printf("[DISPENSER] Request rejected: target %d mL out of range.\n", target_ml);
+        return false;
+    }
+    if (_water_level >= 0 && _water_level <= LOCAL_PUMP_CUTOFF_PERCENT) {
+        Serial.println("[DISPENSER] Request rejected: water level too low.");
+        return false;
+    }
+    #if !ALLOW_DISPENSE_WITHOUT_LOAD_CELL
+    if (!load_cell_ok()) {
+        Serial.printf("[DISPENSER] Request rejected: load cell not ready (%s).\n",
+                      load_cell_status());
+        return false;
+    }
+    #endif
+
+    strncpy(_pending_container, container_type, sizeof(_pending_container) - 1);
+    _pending_container[sizeof(_pending_container) - 1] = '\0';
+    _pending_target_ml = target_ml;
+    _pending_command_id = command_id;
+    _pending_request = true;
+
+    Serial.printf("[DISPENSER] Request queued: %s → %d mL (command #%ld)\n",
+                  _pending_container, _pending_target_ml, _pending_command_id);
+    return true;
 }
 
 // ── Main Loop ────────────────────────────────────────────
 
 DispenserState dispenser_loop() {
     // ── Read sensors ─────────────────────────────────
-    _cup = sensors_read_cup();
+    _container = sensors_read_container();
     _hand = sensors_read_hand();
     _water_level = sensors_read_water_level();
 
-    // ── Emergency: sensor error → pump OFF ───────────
+    // Keep the load cell sampling while idle so a request can start immediately.
+    load_cell_update();
+
+    // ── Emergency: water-level sensor error → pump OFF ──
     if (_water_level < 0 || sensors_has_error()) {
         if (_pump_on) {
             Serial.println("[SAFETY] Sensor error — stopping pump.");
-            pump_off();
-            if (_active_session_id > 0) {
-                #if !TEST_MODE || ENABLE_API_TEST_REQUESTS
-                api_dispensing_complete(_active_session_id, _water_level >= 0 ? _water_level : 0, "error");
-                #endif
-                _active_session_id = 0;
-            }
+            finish_session("error");
         }
         set_state(STATE_ERROR);
         return _state;
@@ -124,14 +234,9 @@ DispenserState dispenser_loop() {
     // ── Emergency: max timeout → pump OFF ────────────
     if (_pump_on && (millis() - _pump_start_ms >= MAX_DISPENSE_TIME_MS)) {
         Serial.println("[SAFETY] Max dispense timeout — stopping pump.");
-        pump_off();
-        if (_active_session_id > 0) {
-            #if !TEST_MODE || ENABLE_API_TEST_REQUESTS
-            api_dispensing_complete(_active_session_id, _water_level, "timeout");
-            #endif
-            _active_session_id = 0;
-        }
-        set_state(STATE_READY);
+        finish_session("timeout");
+        set_state(STATE_COMPLETE);
+        _complete_since = millis();
         return _state;
     }
 
@@ -139,17 +244,21 @@ DispenserState dispenser_loop() {
     if (_water_level <= LOCAL_PUMP_CUTOFF_PERCENT) {
         if (_pump_on) {
             Serial.println("[SAFETY] Low water — stopping pump.");
-            pump_off();
-            if (_active_session_id > 0) {
-                #if !TEST_MODE || ENABLE_API_TEST_REQUESTS
-                api_dispensing_complete(_active_session_id, _water_level, "low_water");
-                #endif
-                _active_session_id = 0;
-            }
+            finish_session("low_water");
         }
         set_state(STATE_LOW_WATER);
         return _state;
     }
+
+    // ── Load cell fault while pumping → pump OFF ─────
+    #if !ALLOW_DISPENSE_WITHOUT_LOAD_CELL
+    if (_pump_on && !load_cell_ok()) {
+        Serial.println("[SAFETY] Load cell fault — stopping pump.");
+        finish_session("error");
+        set_state(STATE_ERROR);
+        return _state;
+    }
+    #endif
 
     // ── Normal state logic ───────────────────────────
     switch (_state) {
@@ -162,60 +271,105 @@ DispenserState dispenser_loop() {
             break;
 
         case STATE_READY:
-            if (_cup) {
-                set_state(STATE_CUP_DETECTED);
+            if (_container) {
+                _container_since = millis();
+                set_state(STATE_CONTAINER_DETECTED);
             }
             break;
 
-        case STATE_CUP_DETECTED:
-            if (!_cup) {
-                // Cup removed before hand — back to ready
+        case STATE_CONTAINER_DETECTED:
+            if (!_container) {
+                _container_since = 0;
                 set_state(STATE_READY);
-            } else {
-                // Cup stable, now waiting for hand
-                set_state(STATE_WAITING_FOR_HAND);
+            } else if (millis() - _container_since >= CONTAINER_STABLE_MS) {
+                set_state(STATE_WAITING_FOR_COMMAND);
             }
             break;
 
-        case STATE_WAITING_FOR_HAND:
-            if (!_cup) {
-                // Cup removed — back to ready
+        case STATE_WAITING_FOR_COMMAND:
+            if (!_container) {
+                // Container removed before dispensing — cancel the request.
+                if (_pending_request && _pending_command_id > 0) {
+                    #if !TEST_MODE || ENABLE_API_TEST_REQUESTS
+                    api_command_result(_pending_command_id, "cancelled", 0, "container_removed");
+                    #endif
+                }
+                reset_request();
                 set_state(STATE_READY);
-            } else if (_hand) {
-                // Both cup and hand — start dispensing
-                pump_on();
+            } else if (_pending_request) {
+                // Validate + start
+                strncpy(_active_container, _pending_container, sizeof(_active_container) - 1);
+                _active_container[sizeof(_active_container) - 1] = '\0';
+                _target_ml = _pending_target_ml;
+                _command_id = _pending_command_id;
+                _pending_request = false;
+
+                _active = true;
+                _measured_ml = 0;
+
+                // Tare with the container in place so only added water is measured.
+                load_cell_tare();
+                load_cell_update();
+
+                // Open the API session (server may override the target).
                 #if !TEST_MODE || ENABLE_API_TEST_REQUESTS
-                _active_session_id = api_dispensing_start(_cup, _hand, _water_level);
+                int reported_target = _target_ml;
+                _active_session_id = api_dispensing_start(
+                    _container, _water_level, _active_container, _command_id, reported_target);
+                if (reported_target > 0 && reported_target <= MAX_TARGET_ML) {
+                    _target_ml = reported_target;
+                }
                 #else
                 _active_session_id = 0;
                 Serial.println("[API] Test mode — dispensing start skipped.");
                 #endif
+
+                pump_on();
                 set_state(STATE_DISPENSING);
+                Serial.printf("[DISPENSER] Dispensing %s → %d mL\n",
+                              _active_container, _target_ml);
             }
             break;
 
-        case STATE_DISPENSING:
-            // Safety checks during dispensing — ALL must hold for pump to stay ON
-            if (!_cup) {
-                Serial.println("[SAFETY] Cup removed — stopping pump.");
-                pump_off();
-                if (_active_session_id > 0) {
-                    #if !TEST_MODE || ENABLE_API_TEST_REQUESTS
-                    api_dispensing_complete(_active_session_id, _water_level, "cup_removed");
-                    #endif
-                    _active_session_id = 0;
-                }
+        case STATE_DISPENSING: {
+            // Safety: container must stay in place
+            if (!_container) {
+                Serial.println("[SAFETY] Container removed — stopping pump.");
+                finish_session("container_removed");
                 set_state(STATE_READY);
-            } else if (!_hand) {
-                Serial.println("[SAFETY] Hand removed — stopping pump.");
-                pump_off();
-                if (_active_session_id > 0) {
-                    #if !TEST_MODE || ENABLE_API_TEST_REQUESTS
-                    api_dispensing_complete(_active_session_id, _water_level, "hand_removed");
-                    #endif
-                    _active_session_id = 0;
-                }
-                set_state(STATE_WAITING_FOR_HAND);
+                break;
+            }
+
+            // Measure (grams ≈ mL)
+            float grams = load_cell_read_grams();
+            if (!isnan(grams)) {
+                if (grams < 0) grams = 0;
+                _measured_ml = (int)grams;
+                _load_cell_valid = true;
+            }
+
+            // Auto-stop when the target is reached
+            #if ALLOW_DISPENSE_WITHOUT_LOAD_CELL
+            // Bench-test only: no measured volume, rely on the timeout.
+            #else
+            if (_load_cell_valid
+                && _measured_ml >= LOAD_CELL_MIN_VALID_G
+                && _measured_ml >= _target_ml) {
+                Serial.printf("[DISPENSER] Target reached: %d / %d mL\n",
+                              _measured_ml, _target_ml);
+                finish_session("target_reached");
+                set_state(STATE_COMPLETE);
+                _complete_since = millis();
+            }
+            #endif
+            break;
+        }
+
+        case STATE_COMPLETE:
+            if (!_container) {
+                set_state(STATE_READY);
+            } else if (millis() - _complete_since >= COMPLETE_HOLD_MS) {
+                set_state(STATE_READY);
             }
             break;
 
@@ -226,7 +380,11 @@ DispenserState dispenser_loop() {
             break;
 
         case STATE_ERROR:
-            if (!sensors_has_error() && _water_level >= 0) {
+            if (!sensors_has_error() && _water_level >= 0
+                #if !ALLOW_DISPENSE_WITHOUT_LOAD_CELL
+                && load_cell_ok()
+                #endif
+            ) {
                 sensors_clear_error();
                 set_state(STATE_READY);
             }
@@ -240,32 +398,41 @@ DispenserState dispenser_loop() {
 
 const char* dispenser_state_name(DispenserState state) {
     switch (state) {
-        case STATE_INIT:              return "INIT";
-        case STATE_WIFI_CONNECTING:   return "WIFI_CONNECTING";
-        case STATE_READY:             return "READY";
-        case STATE_CUP_DETECTED:      return "CUP_DETECTED";
-        case STATE_WAITING_FOR_HAND:  return "WAITING_FOR_HAND";
-        case STATE_DISPENSING:        return "DISPENSING";
-        case STATE_LOW_WATER:         return "LOW_WATER";
-        case STATE_ERROR:             return "ERROR";
-        default:                      return "UNKNOWN";
+        case STATE_INIT:                 return "INIT";
+        case STATE_WIFI_CONNECTING:      return "WIFI_CONNECTING";
+        case STATE_READY:                return "READY";
+        case STATE_CONTAINER_DETECTED:   return "CONTAINER_DETECTED";
+        case STATE_WAITING_FOR_COMMAND:  return "WAITING_FOR_COMMAND";
+        case STATE_DISPENSING:           return "DISPENSING";
+        case STATE_COMPLETE:             return "COMPLETE";
+        case STATE_LOW_WATER:            return "LOW_WATER";
+        case STATE_ERROR:                return "ERROR";
+        default:                         return "UNKNOWN";
     }
 }
 
-DispenserState dispenser_get_state()     { return _state; }
-int  dispenser_get_water_level()         { return _water_level; }
-bool dispenser_get_cup()                 { return _cup; }
-bool dispenser_get_hand()                { return _hand; }
-bool dispenser_get_pump()                { return _pump_on; }
-long dispenser_get_session_id()          { return _active_session_id; }
+DispenserState dispenser_get_state()   { return _state; }
+bool dispenser_get_container()         { return _container; }
+bool dispenser_get_hand()              { return _hand; }
+int  dispenser_get_water_level()       { return _water_level; }
+bool dispenser_get_pump()              { return _pump_on; }
+int  dispenser_get_measured_ml()       { return _measured_ml; }
+int  dispenser_get_target_ml()        { return _target_ml; }
+long dispenser_get_session_id()        { return _active_session_id; }
+long dispenser_get_command_id()        { return _command_id; }
+bool dispenser_has_pending_request()   { return _pending_request; }
+
+const char* dispenser_get_container_type() {
+    if (_active) return _active_container;
+    if (_pending_request) return _pending_container;
+    return "";
+}
 
 void dispenser_emergency_stop() {
-    pump_off();
-    if (_active_session_id > 0) {
-        #if !TEST_MODE || ENABLE_API_TEST_REQUESTS
-        api_dispensing_complete(_active_session_id, _water_level >= 0 ? _water_level : 0, "manual_stop");
-        #endif
-        _active_session_id = 0;
+    if (_pump_on || _active_session_id > 0 || _active) {
+        finish_session("manual_stop");
+    } else {
+        reset_request();
     }
     set_state(STATE_READY);
     Serial.println("[DISPENSER] Emergency stop.");

@@ -20,7 +20,7 @@ include __DIR__ . '/../includes/header.php';
 ?>
 
 <?php if (!$device): ?>
-<div class="dev-notice"><span>⚠</span><span><strong>Development Mode</strong> No device is registered. Register an ESP32 device to begin monitoring.</span></div>
+<div class="dev-notice"><span>⚠</span><span><strong>No Device Registered</strong> Register an ESP32 device to begin monitoring.</span></div>
 
 <div class="empty-state">
     <div class="empty-icon">📡</div>
@@ -89,8 +89,8 @@ include __DIR__ . '/../includes/header.php';
             <?php if ($latest_reading): ?>
                 <table style="width:100%">
                     <tr><td class="text-muted" style="width:40%">Water Level</td><td><?= $latest_reading['water_level_percent'] !== null ? $latest_reading['water_level_percent'] . '%' : '—' ?></td></tr>
-                    <tr><td class="text-muted">Cup Detected</td><td><?= $latest_reading['cup_detected'] ? 'Yes' : 'No' ?></td></tr>
-                    <tr><td class="text-muted">Hand Detected</td><td><?= $latest_reading['hand_detected'] ? 'Yes' : 'No' ?></td></tr>
+                    <tr><td class="text-muted">Container Detected</td><td><?= !empty($latest_reading['container_detected']) || !empty($latest_reading['cup_detected']) ? 'Yes' : 'No' ?></td></tr>
+                    <tr><td class="text-muted">Hand (diagnostic)</td><td><?= !empty($latest_reading['hand_detected']) ? 'Yes' : 'No' ?></td></tr>
                     <tr><td class="text-muted">Pump Status</td><td><?= $latest_reading['pump_status'] ? 'ON' : 'OFF' ?></td></tr>
                     <tr><td class="text-muted">Battery</td><td><?= $latest_reading['battery_percent'] !== null ? $latest_reading['battery_percent'] . '%' : '—' ?></td></tr>
                     <tr><td class="text-muted">Recorded At</td><td><?= format_datetime($latest_reading['recorded_at']) ?></td></tr>

@@ -9,4 +9,5 @@ session_destroy();
 header('Cache-Control: no-cache, no-store, must-revalidate');
 header('Pragma: no-cache');
 header('Expires: 0');
-redirect('/auth/login.php');
+// Logout always returns to the Admin Portal entry point (admin login).
+redirect('/admin/');

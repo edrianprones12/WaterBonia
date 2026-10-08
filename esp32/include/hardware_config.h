@@ -13,22 +13,35 @@
 #ifndef HARDWARE_CONFIG_H
 #define HARDWARE_CONFIG_H
 
-// ── HC-SR04 Ultrasonic (Hand Detection) ──────────────────
+// ── HC-SR04 Ultrasonic (Hand Detection — optional) ──────
+// NOTE: Hand detection is NOT a dispense trigger in v2.
+// Kept for diagnostics / future optional gestures.
 // Note: Echo line may output 5V. Use a voltage divider (e.g. 1kΩ + 2kΩ)
 //       to bring echo signal to 3.3V safe level for ESP32 GPIO.
 #define PIN_HCSR04_TRIG        25
 #define PIN_HCSR04_ECHO        26
 
-// ── IR Proximity Sensor (Cup Detection) ──────────────────
-// Connect IR sensor digital output here.
-// If sensor is active-low, set CUP_SENSOR_ACTIVE_LOW in config.h
-#define PIN_CUP_SENSOR         27
+// ── Container Presence Sensor ────────────────────────────
+// Connect the container presence sensor digital output here.
+// Presence only — it does NOT distinguish cup from tumbler.
+// If the sensor is active-low, set CONTAINER_SENSOR_ACTIVE_LOW in config.h.
+#define PIN_CONTAINER_SENSOR   27
+
+// Legacy alias (older code referenced PIN_CUP_SENSOR).
+#define PIN_CUP_SENSOR         PIN_CONTAINER_SENSOR
 
 // ── Water Level Sensor ───────────────────────────────────
 // Placeholder pins — adjust when final sensor is selected.
 // For analog sensors: use ADC-capable pins (GPIO 32-39 on ESP32).
 // For digital/serial sensors: adjust pins and protocol accordingly.
 #define PIN_WATER_LEVEL_ANALOG 34   // ADC1 channel (safe for Wi-Fi)
+
+// ── HX711 Load Cell Amplifier ────────────────────────────
+// *** PLACEHOLDER PINS — NOT YET WIRED / NOT FINALIZED. ***
+// Confirm these against your final schematic before powering hardware.
+// Suggested: DOUT on 19, SCK on 18 (free of ADC1/Wi-Fi conflicts).
+#define PIN_HX711_DOUT         19
+#define PIN_HX711_SCK          18
 
 // ── Relay / Pump Control ─────────────────────────────────
 // Relay module IN pin. Default safe state: OFF (relay inactive).

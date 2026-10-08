@@ -5,6 +5,34 @@ REST API for ESP32 device communication with the WaterBonia server.
 **Base URL:** `http://localhost/WaterBonia/api/`
 **Content-Type:** `application/json`
 
+URLs are rewritten to `api/index.php` by `api/.htaccess`, so both
+`/WaterBonia/api/device/heartbeat` and `/WaterBonia/api/index.php/device/heartbeat`
+resolve to the same route.
+
+---
+
+## Dispensing v2 Flow
+
+```
+Web user picks container ──► POST /pages/dispenser-status.php (CSRF, session auth)
+                              inserts a pending row in `device_commands`
+                                      │
+ESP32 polls every 2 s ────────────────┘
+        POST /api/device/poll-command  (Bearer)  → claims the oldest pending command
+                                      │
+        POST /api/device/dispensing/start        → opens the session
+                                      │
+        POST /api/device/sensor-reading (measured_ml) → live progress on the dashboard
+                                      │
+        POST /api/device/dispensing/complete     → measured volume + stop reason
+        POST /api/device/command-result          → command outcome
+```
+
+The **server is authoritative** for the target volume: it derives
+`target_amount_ml` from `container_type` and the `system_settings` keys
+`container_cup_target_ml` / `container_tumbler_target_ml`. A target sent by a
+client is validated (1–2000 mL) but never blindly trusted.
+
 ---
 
 ## Authentication
@@ -34,7 +62,7 @@ Public endpoint. Returns API status and available endpoints.
   "success": true,
   "data": {
     "system": "WaterBonia",
-    "version": "0.1.0-dev",
+    "version": "0.2.0-dev",
     "api_version": "1.0.0",
     "timestamp": "2026-09-21T10:00:00+08:00",
     "endpoints": { ... }
@@ -91,9 +119,10 @@ Receives sensor telemetry from the ESP32.
 ```json
 {
   "water_level_percent": 72,
-  "cup_detected": false,
+  "container_detected": true,
   "hand_detected": false,
-  "pump_status": false,
+  "pump_status": true,
+  "measured_ml": 180,
   "battery_percent": 84
 }
 ```
@@ -104,7 +133,7 @@ Receives sensor telemetry from the ESP32.
   "success": true,
   "data": {
     "reading_id": 123,
-    "recorded_at": "2026-09-21T10:00:00+08:00"
+    "recorded_at": "2026-10-07T12:00:00+02:00"
   },
   "message": "Sensor reading accepted."
 }
@@ -115,13 +144,17 @@ Receives sensor telemetry from the ESP32.
 |-------|-------|
 | `water_level_percent` | 0–100 or null |
 | `battery_percent` | 0–100 or null |
-| `cup_detected` | boolean |
-| `hand_detected` | boolean |
+| `container_detected` | boolean (presence only — never classifies cup vs tumbler) |
+| `cup_detected` | boolean, legacy alias of `container_detected` |
+| `hand_detected` | boolean, diagnostic only — **not a dispense trigger** |
 | `pump_status` | boolean |
+| `measured_ml` | non-negative integer or null; live load-cell reading |
 
 **Behavior:**
 - Stores reading in `sensor_readings`
 - Updates `devices.last_seen_at`
+- When `measured_ml` is supplied and a session is active, updates
+  `dispensing_sessions.measured_amount_ml` so the dashboard shows live progress
 - Checks low-water threshold and creates/resolves alerts automatically
 - Rate limit: 60 requests per 60 seconds
 
@@ -129,6 +162,73 @@ Receives sensor telemetry from the ESP32.
 - If `water_level_percent <= low_water_threshold` and no active `low_water` alert exists → creates alert
 - If `water_level_percent > low_water_threshold` and active `low_water` alert exists → auto-resolves it
 - No duplicate alerts while water remains below threshold
+
+---
+
+### POST /api/device/poll-command
+
+Claims the oldest pending dispense command queued by the web dashboard.
+
+**Headers:** `Authorization: Bearer <token>`, `Content-Type: application/json`
+
+**Request:** `{}`
+
+**Response (200) — command available:**
+```json
+{
+  "success": true,
+  "data": {
+    "command": {
+      "command_id": 5,
+      "command_type": "dispense",
+      "container_type": "cup",
+      "target_amount_ml": 250,
+      "requested_at": "2026-10-07 12:06:35"
+    }
+  },
+  "message": "Command dispatched."
+}
+```
+
+**Response (200) — nothing pending:**
+```json
+{ "success": true, "data": { "command": null }, "message": "No pending commands." }
+```
+
+**Behavior:**
+- Marks pending commands past their TTL (`dispense_command_ttl_sec`, default 30 s) as `expired`
+- Claims the oldest pending command atomically (transaction + `FOR UPDATE`)
+- Derives `target_amount_ml` server-side from `container_type`
+- Rate limit: 120 requests per 60 seconds (poll interval 2 s)
+
+---
+
+### POST /api/device/command-result
+
+Reports the outcome of a claimed command.
+
+**Request:**
+```json
+{
+  "command_id": 5,
+  "result": "completed",
+  "session_id": 456,
+  "reason": "target_reached"
+}
+```
+
+**Validation:**
+| Field | Rules |
+|-------|-------|
+| `command_id` | Required, must belong to this device |
+| `result` | `completed`, `rejected`, or `cancelled` |
+| `session_id` | optional integer |
+| `reason` | optional string (e.g. `local_validation_failed`, `container_removed`) |
+
+**Behavior:**
+- Only updates commands still in `claimed` status (commands already completed by
+  `dispensing/start` keep their session linkage)
+- Rate limit: 60 requests per 60 seconds
 
 ---
 
@@ -141,9 +241,11 @@ Starts a new dispensing session.
 **Request:**
 ```json
 {
-  "cup_detected": true,
-  "hand_detected": true,
-  "water_level_before": 72
+  "container_detected": true,
+  "container_type": "cup",
+  "target_amount_ml": 250,
+  "water_level_before": 72,
+  "command_id": 5
 }
 ```
 
@@ -153,7 +255,9 @@ Starts a new dispensing session.
   "success": true,
   "data": {
     "session_id": 456,
-    "started_at": "2026-09-21T10:00:00+08:00"
+    "started_at": "2026-10-07T12:00:00+02:00",
+    "container_type": "cup",
+    "target_amount_ml": 250
   },
   "message": "Dispensing session started."
 }
@@ -162,12 +266,17 @@ Starts a new dispensing session.
 **Validation:**
 | Field | Rules |
 |-------|-------|
-| `cup_detected` | boolean, optional |
-| `hand_detected` | boolean, optional |
+| `container_detected` | boolean, optional |
+| `cup_detected` | boolean, legacy alias |
+| `container_type` | `cup` or `tumbler`, optional |
+| `target_amount_ml` | 1–2000, optional — **the server recomputes the target from `container_type`** |
 | `water_level_before` | 0–100 or null, optional |
+| `command_id` | optional `device_commands.id` to link |
 
 **Behavior:**
 - Creates row in `dispensing_sessions` with `status = started`
+- Derives `target_amount_ml` from `system_settings` (browser value is never trusted)
+- Marks the linked command `completed` and stores `session_id`
 - Rejects if an active session already exists (HTTP 409)
 - Rate limit: 30 requests per 60 seconds
 
@@ -184,8 +293,9 @@ Completes or interrupts an active dispensing session.
 {
   "session_id": 456,
   "water_level_after": 68,
-  "amount_dispensed_ml": null,
-  "stop_reason": "completed"
+  "stop_reason": "target_reached",
+  "measured_amount_ml": 252,
+  "amount_dispensed_ml": 252
 }
 ```
 
@@ -197,7 +307,8 @@ Completes or interrupts an active dispensing session.
     "session_id": 456,
     "status": "completed",
     "duration_seconds": 12,
-    "ended_at": "2026-09-21T10:00:12+08:00"
+    "measured_amount_ml": 252,
+    "ended_at": "2026-10-07T12:00:12+02:00"
   },
   "message": "Dispensing session completed."
 }
@@ -208,12 +319,20 @@ Completes or interrupts an active dispensing session.
 |-------|-------|
 | `session_id` | Required, must exist, must belong to this device, must be active |
 | `water_level_after` | 0–100 or null |
-| `amount_dispensed_ml` | Non-negative integer or null |
-| `stop_reason` | One of: `completed`, `cup_removed`, `hand_removed`, `timeout`, `low_water`, `manual_stop`, `error` |
+| `measured_amount_ml` | Non-negative integer or null (preferred) |
+| `amount_dispensed_ml` | Non-negative integer or null (legacy alias) |
+| `stop_reason` | One of: `target_reached`, `container_removed`, `timeout`, `low_water`, `manual_stop`, `completed`, `command_expired`, `error`, `cup_removed`, `hand_removed` |
+
+**Status mapping:**
+| stop_reason | Final status |
+|-------------|--------------|
+| `target_reached`, `completed` | `completed` |
+| `container_removed`, `timeout`, `low_water`, `manual_stop`, `command_expired` | `interrupted` |
+| `error` | `failed` |
 
 **Behavior:**
 - Calculates duration from server timestamps
-- Sets final status based on stop_reason
+- Stores `measured_amount_ml` and mirrors it into `amount_dispensed_ml`
 - Uses database transaction for consistency
 - Rejects session belonging to another device (HTTP 403)
 - Rate limit: 30 requests per 60 seconds
@@ -258,6 +377,8 @@ Completes or interrupts an active dispensing session.
 |----------|-------|--------|
 | `heartbeat` | 30 req | 60s |
 | `sensor-reading` | 60 req | 60s |
+| `poll-command` | 120 req | 60s |
+| `command-result` | 60 req | 60s |
 | `dispensing/start` | 30 req | 60s |
 | `dispensing/complete` | 30 req | 60s |
 

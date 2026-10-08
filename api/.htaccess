@@ -1,0 +1,11 @@
+# WaterBonia API — route /WaterBonia/api/<endpoint> to the router
+# Requires AllowOverride FileInfo (enabled in the XAMPP default config).
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteRule ^ index.php [L]
+</IfModule>
+
+# Re-expose the Authorization header to PHP if Apache stripped it.
+SetEnvIf Authorization "(.*)" HTTP_AUTHORIZATION=$1

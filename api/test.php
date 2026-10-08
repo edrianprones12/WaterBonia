@@ -2,7 +2,6 @@
 /**
  * WaterBonia API Test Script
  *
- * Run from browser:  http://localhost/WaterBonia/api/test.php
  * Run from CLI:      php C:\xampp\htdocs\WaterBonia\api\test.php
  *
  * This script tests the API endpoints against a running XAMPP MySQL.
@@ -10,19 +9,15 @@
  *
  * SAFETY: This script creates and deletes test data.
  *         It does NOT modify existing production records.
+ *         CLI only — it is never executable from the browser in production.
  */
 
 $is_cli = php_sapi_name() === 'cli';
 
 if (!$is_cli) {
-    echo '<!DOCTYPE html><html><head><title>WaterBonia API Tests</title>';
-    echo '<style>body{font-family:monospace;background:#1e293b;color:#e2e8f0;padding:1.5rem;line-height:1.6}';
-    echo '.pass{color:#4ade80}.fail{color:#f87171}.info{color:#60a5fa}.warn{color:#fbbf24}';
-    echo 'h2{color:#38bdf8;border-bottom:1px solid #334155;padding-bottom:0.5rem}';
-    echo 'pre{background:#0f172a;padding:0.75rem;border-radius:6px;overflow-x:auto;font-size:0.82rem}';
-    echo '.summary{background:#0f172a;padding:1rem;border-radius:8px;margin-top:1rem;border:1px solid #334155}';
-    echo '</style></head><body>';
-    echo '<h1>WaterBonia API Test Suite</h1>';
+    http_response_code(403);
+    header('Content-Type: text/plain; charset=utf-8');
+    exit("This test suite runs from the command line only:\n  php " . __FILE__ . "\n");
 }
 
 function out(string $msg, string $class = ''): void
@@ -342,6 +337,7 @@ $pdo->prepare("DELETE FROM activity_logs WHERE device_id IN (?, ?)")->execute([$
 $pdo->prepare("DELETE FROM alerts WHERE device_id IN (?, ?)")->execute([$test_device_id, $other_id]);
 $pdo->prepare("DELETE FROM sensor_readings WHERE device_id = ?")->execute([$test_device_id]);
 $pdo->prepare("DELETE FROM dispensing_sessions WHERE device_id IN (?, ?)")->execute([$test_device_id, $other_id]);
+$pdo->prepare("DELETE FROM device_commands WHERE device_id IN (?, ?)")->execute([$test_device_id, $other_id]);
 $pdo->prepare("DELETE FROM device_tokens WHERE device_id IN (?, ?)")->execute([$test_device_id, $other_id]);
 $pdo->prepare("DELETE FROM devices WHERE id IN (?, ?)")->execute([$test_device_id, $other_id]);
 out("Removed test device and all related records.", 'info');

@@ -4,23 +4,30 @@
  * Handles all sensor reading and debouncing.
  * Water-level sensor implementation is isolated for easy replacement.
  * Sensor errors are reported cleanly — never assume tank is full on error.
+ *
+ * v2: container presence is the sensor that gates dispensing.
+ *     It reports PRESENCE ONLY — cup vs tumbler is chosen on the web.
  */
 
 #ifndef SENSORS_H
 #define SENSORS_H
 
 #include <Arduino.h>
+#include "config.h"
 
 // Initialize all sensor pins
 void sensors_init();
 
-// Read hand detection (HC-SR04 ultrasonic)
-// Returns true if an object is within the configured detection range.
-bool sensors_read_hand();
+// Read container presence (IR / breakbeam / limit switch).
+// Presence only — does NOT classify cup vs tumbler.
+bool sensors_read_container();
 
-// Read cup detection (IR sensor)
-// Returns true if a cup is detected.
+// Legacy alias — older code and telemetry used the name "cup".
 bool sensors_read_cup();
+
+// Read hand detection (HC-SR04 ultrasonic) — diagnostic only.
+// NOT a dispense trigger in v2.
+bool sensors_read_hand();
 
 // Read water level as percentage (0-100)
 // Returns -1 on sensor error.
@@ -40,7 +47,8 @@ void sensors_clear_error();
 // They have no effect when TEST_MODE=0.
 // Simulated values are NEVER sent to the production database.
 #if TEST_MODE
-void sensors_set_sim_cup(bool detected);
+void sensors_set_sim_container(bool detected);
+void sensors_set_sim_cup(bool detected);      // alias of container
 void sensors_set_sim_hand(bool detected);
 void sensors_set_sim_water_level(int percent);
 void sensors_set_sim_error(bool error);

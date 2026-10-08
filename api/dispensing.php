@@ -17,20 +17,31 @@ function handle_dispensing_start(array $auth): void
     $errors = [];
 
     // Validate optional booleans
-    foreach (['cup_detected', 'hand_detected'] as $field) {
-        if (array_key_exists($body[$field] ?? null, $body)) {
-            // already set from default
-        }
-    }
     if (isset($body['cup_detected'])) {
         $err = validate_bool($body['cup_detected'], 'cup_detected');
         if ($err) $errors['cup_detected'] = $err;
         else $body['cup_detected'] = (bool)$body['cup_detected'];
     }
-    if (isset($body['hand_detected'])) {
-        $err = validate_bool($body['hand_detected'], 'hand_detected');
-        if ($err) $errors['hand_detected'] = $err;
-        else $body['hand_detected'] = (bool)$body['hand_detected'];
+    if (isset($body['container_detected'])) {
+        $err = validate_bool($body['container_detected'], 'container_detected');
+        if ($err) $errors['container_detected'] = $err;
+        else $body['container_detected'] = (bool)$body['container_detected'];
+    }
+
+    // Validate container_type
+    if (isset($body['container_type']) && $body['container_type'] !== null) {
+        if (!in_array($body['container_type'], ['cup', 'tumbler'], true)) {
+            $errors['container_type'] = 'Must be "cup" or "tumbler".';
+        }
+    }
+
+    // Validate target_amount_ml (server-side authoritative target also checked)
+    if (isset($body['target_amount_ml']) && $body['target_amount_ml'] !== null) {
+        if (!is_numeric($body['target_amount_ml']) || (int)$body['target_amount_ml'] < 1 || (int)$body['target_amount_ml'] > 2000) {
+            $errors['target_amount_ml'] = 'Must be between 1 and 2000 mL.';
+        } else {
+            $body['target_amount_ml'] = (int)$body['target_amount_ml'];
+        }
     }
 
     // Validate water_level_before
@@ -42,6 +53,15 @@ function handle_dispensing_start(array $auth): void
 
     if (!empty($errors)) {
         api_error('Validation failed', 422, $errors);
+    }
+
+    // Server determines/authorizes target from container_type — never trusts
+    // the browser's target blindly. If a command exists for this device, use it.
+    $container_type = $body['container_type'] ?? null;
+    $target_ml = null;
+    if ($container_type) {
+        $setting_key = 'container_' . $container_type . '_target_ml';
+        $target_ml = (int)get_setting($setting_key, $container_type === 'tumbler' ? '500' : '250');
     }
 
     // Check if there's already an active session for this device
@@ -56,18 +76,36 @@ function handle_dispensing_start(array $auth): void
     $session_id = db_insert('dispensing_sessions', [
         'device_id'          => $device_id,
         'started_at'         => date('Y-m-d H:i:s'),
-        'cup_detected'       => $body['cup_detected'] ?? false ? 1 : 0,
-        'hand_detected'      => $body['hand_detected'] ?? false ? 1 : 0,
+        'cup_detected'       => ($body['container_detected'] ?? $body['cup_detected'] ?? true) ? 1 : 0,
+        'hand_detected'      => 0,
         'water_level_before' => $body['water_level_before'] ?? null,
+        'container_type'     => $container_type,
+        'target_amount_ml'   => $target_ml,
         'status'             => 'started',
     ]);
 
+    // Link the claimed command to this session
+    if (!empty($body['command_id'])) {
+        $cmd = db_fetch(
+            "SELECT id, device_id, status FROM device_commands WHERE id = ?",
+            [(int)$body['command_id']]
+        );
+        if ($cmd && (int)$cmd['device_id'] === $device_id && $cmd['status'] === 'claimed') {
+            db_update('device_commands',
+                ['status' => 'completed', 'session_id' => $session_id, 'completed_at' => date('Y-m-d H:i:s')],
+                'id = ?', [$cmd['id']]);
+        }
+    }
+
     log_event($device_id, null, 'dispensing_started', 'info',
-        "Dispensing session #{$session_id} started.");
+        "Dispensing session #{$session_id} started" .
+        ($container_type ? " (container: {$container_type}, target: {$target_ml}mL)" : '') . '.');
 
     api_success([
-        'session_id' => $session_id,
-        'started_at' => date('c'),
+        'session_id'      => $session_id,
+        'started_at'      => date('c'),
+        'container_type'  => $container_type,
+        'target_amount_ml'=> $target_ml,
     ], 'Dispensing session started.', 201);
 }
 
@@ -117,8 +155,15 @@ function handle_dispensing_complete(array $auth): void
             $body['amount_dispensed_ml'] = (int)$body['amount_dispensed_ml'];
         }
     }
+    if (isset($body['measured_amount_ml']) && $body['measured_amount_ml'] !== null) {
+        if (!is_numeric($body['measured_amount_ml']) || (int)$body['measured_amount_ml'] < 0) {
+            $errors['measured_amount_ml'] = 'Must be a non-negative number.';
+        } else {
+            $body['measured_amount_ml'] = (int)$body['measured_amount_ml'];
+        }
+    }
 
-    $valid_stop_reasons = ['cup_removed','hand_removed','timeout','low_water','manual_stop','completed','error'];
+    $valid_stop_reasons = ['target_reached','container_removed','timeout','low_water','manual_stop','completed','error','command_expired'];
     if (isset($body['stop_reason']) && !in_array($body['stop_reason'], $valid_stop_reasons)) {
         $errors['stop_reason'] = 'Invalid stop_reason. Valid: ' . implode(', ', $valid_stop_reasons);
     }
@@ -135,11 +180,16 @@ function handle_dispensing_complete(array $auth): void
     // Determine final status
     $stop_reason = $body['stop_reason'] ?? 'completed';
     $final_status = 'completed';
-    if (in_array($stop_reason, ['cup_removed','hand_removed','timeout','low_water','manual_stop'])) {
+    if (in_array($stop_reason, ['container_removed','timeout','low_water','manual_stop','command_expired'])) {
         $final_status = 'interrupted';
     } elseif ($stop_reason === 'error') {
         $final_status = 'failed';
     }
+
+    // Measured amount (load cell) — preferred over legacy amount field
+    $measured = $body['measured_amount_ml']
+        ?? $body['amount_dispensed_ml']
+        ?? $session['measured_amount_ml'];
 
     // Use transaction for consistency
     db()->beginTransaction();
@@ -148,7 +198,8 @@ function handle_dispensing_complete(array $auth): void
             'ended_at'            => date('Y-m-d H:i:s'),
             'duration_seconds'    => $duration,
             'water_level_after'   => $body['water_level_after'] ?? $session['water_level_after'],
-            'amount_dispensed_ml' => $body['amount_dispensed_ml'] ?? $session['amount_dispensed_ml'],
+            'amount_dispensed_ml' => $measured ?? $session['amount_dispensed_ml'],
+            'measured_amount_ml'  => $measured,
             'stop_reason'         => $stop_reason,
             'status'              => $final_status,
         ];
@@ -157,8 +208,20 @@ function handle_dispensing_complete(array $auth): void
         // Log the event
         $log_type = $final_status === 'completed' ? 'dispensing_completed' : 'dispensing_interrupted';
         $log_level = $final_status === 'failed' ? 'error' : 'info';
+        $measured_str = $measured !== null ? ", measured {$measured}mL" : '';
         log_event($device_id, null, $log_type, $log_level,
-            "Session #{$session_id} {$final_status} after {$duration}s. Reason: {$stop_reason}");
+            "Session #{$session_id} {$final_status} after {$duration}s. Reason: {$stop_reason}{$measured_str}");
+
+        // One alert per non-clean end of a session (a session can only end once).
+        if ($final_status !== 'completed') {
+            $is_timeout = $stop_reason === 'timeout';
+            create_alert($device_id,
+                $is_timeout ? 'dispensing_timeout' : 'dispensing_interrupted',
+                $final_status === 'failed' ? 'critical' : 'warning',
+                $is_timeout ? 'Dispensing timed out' : 'Dispensing interrupted',
+                "Session #{$session_id} ended after {$duration}s — reason: " .
+                str_replace('_', ' ', $stop_reason) . '.');
+        }
 
         db()->commit();
     } catch (Exception $e) {
@@ -167,9 +230,10 @@ function handle_dispensing_complete(array $auth): void
     }
 
     api_success([
-        'session_id'     => $session_id,
-        'status'         => $final_status,
-        'duration_seconds' => $duration,
-        'ended_at'       => date('c'),
+        'session_id'          => $session_id,
+        'status'              => $final_status,
+        'duration_seconds'    => $duration,
+        'measured_amount_ml'  => $measured ?? null,
+        'ended_at'            => date('c'),
     ], 'Dispensing session ' . $final_status . '.');
 }

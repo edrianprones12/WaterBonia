@@ -5,8 +5,17 @@
  *   PHYSICAL SENSORS → ESP32 LOCAL CONTROL → LOCAL SAFETY → PUMP
  *   ESP32 → Wi-Fi → WaterBonia PHP API → MySQL → Web Dashboard
  *
- * The API is for monitoring and records.
- * The ESP32 is responsible for immediate physical control and safety.
+ * The API is for monitoring, records, and dispense REQUESTS.
+ * The ESP32 is responsible for immediate physical control and safety:
+ * the website can only queue a command, and local validation decides
+ * whether the pump may run.
+ *
+ * v2 flow:
+ *   1. Web user chooses container (cup / tumbler)
+ *   2. Container sensor reports presence
+ *   3. Web user presses DISPENSE → server queues a command
+ *   4. This firmware polls the command, validates locally, tares
+ *      the load cell, runs the pump and stops at the target volume
  *
  * IMPORTANT: This firmware does NOT generate device tokens.
  * Tokens are obtained from the WaterBonia web dashboard and stored in NVS.
@@ -29,6 +38,7 @@
 #include "wifi_manager.h"
 #include "api_client.h"
 #include "sensors.h"
+#include "load_cell.h"
 #include "dispenser.h"
 #include "status_led.h"
 
@@ -36,10 +46,7 @@
 
 static unsigned long _last_heartbeat = 0;
 static unsigned long _last_telemetry = 0;
-
-// ── Test Mode Simulation State ───────────────────────────
-// Test mode uses sensors_set_sim_*() functions from sensors.h
-// to set simulated values. No local state needed.
+static unsigned long _last_command_poll = 0;
 
 // ── Serial Provisioning Trigger ──────────────────────────
 
@@ -82,12 +89,36 @@ static void send_telemetry() {
     if (!wifi_is_connected()) return;
 
     int water = dispenser_get_water_level();
-    bool cup = dispenser_get_cup();
+    if (water < 0) return;   // never report a fabricated level
+
+    bool container = dispenser_get_container();
     bool hand = dispenser_get_hand();
     bool pump = dispenser_get_pump();
+    int measured = dispenser_get_pump() ? dispenser_get_measured_ml() : -1;
 
-    if (water >= 0) {
-        api_send_sensor_reading(water, cup, hand, pump, -1);
+    api_send_sensor_reading(water, container, hand, pump, -1, measured);
+}
+
+// ── Poll for a dispense command (web → ESP32) ───────────
+
+static void poll_commands() {
+    if (!wifi_is_connected()) return;
+    if (dispenser_get_state() == STATE_DISPENSING) return;
+    if (dispenser_get_state() == STATE_WIFI_CONNECTING) return;
+    if (dispenser_has_pending_request()) return;
+    if (!dispenser_get_container()) return;   // nothing to fill
+
+    DispenseCommand cmd;
+    if (api_poll_command(cmd)) {
+        bool accepted = dispenser_request_dispense(
+            cmd.container_type, cmd.target_amount_ml, cmd.command_id);
+
+        if (!accepted) {
+            // Tell the server so the queued command does not sit there
+            #if !TEST_MODE || ENABLE_API_TEST_REQUESTS
+            api_command_result(cmd.command_id, "rejected", 0, "local_validation_failed");
+            #endif
+        }
     }
 }
 
@@ -100,12 +131,14 @@ static void handle_test_serial() {
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
 
-    if (cmd == "CUP ON" || cmd == "CUP=1") {
-        sensors_set_sim_cup(true);
-        Serial.println("[TEST] Simulated cup: DETECTED");
-    } else if (cmd == "CUP OFF" || cmd == "CUP=0") {
-        sensors_set_sim_cup(false);
-        Serial.println("[TEST] Simulated cup: NOT DETECTED");
+    if (cmd == "CONTAINER ON" || cmd == "CONTAINER=1" ||
+        cmd == "CUP ON" || cmd == "CUP=1") {
+        sensors_set_sim_container(true);
+        Serial.println("[TEST] Simulated container: DETECTED");
+    } else if (cmd == "CONTAINER OFF" || cmd == "CONTAINER=0" ||
+               cmd == "CUP OFF" || cmd == "CUP=0") {
+        sensors_set_sim_container(false);
+        Serial.println("[TEST] Simulated container: NOT DETECTED");
     } else if (cmd == "HAND ON" || cmd == "HAND=1") {
         sensors_set_sim_hand(true);
         Serial.println("[TEST] Simulated hand: DETECTED");
@@ -120,6 +153,20 @@ static void handle_test_serial() {
         } else {
             Serial.println("[TEST] Invalid water level. Use WATER=0 to WATER=100");
         }
+    } else if (cmd.startsWith("DISPENSE")) {
+        // Local test trigger — bypasses the server, still runs all
+        // local safety checks inside dispenser_request_dispense().
+        const char *ctype = DEFAULT_CONTAINER_TYPE;
+        int sep = cmd.indexOf('=');
+        if (sep > 0) {
+            String arg = cmd.substring(sep + 1);
+            arg.trim();
+            arg.toLowerCase();
+            if (arg == "tumbler") ctype = "tumbler";
+        }
+        bool ok = dispenser_request_dispense(ctype, DEFAULT_TARGET_ML, 0);
+        Serial.printf("[TEST] Dispense request (%s): %s\n",
+                      ctype, ok ? "ACCEPTED" : "REJECTED");
     } else if (cmd == "SENSOR ERROR" || cmd == "SENSOR=ERROR") {
         sensors_set_sim_error(true);
         Serial.println("[TEST] Simulated sensor error active");
@@ -128,12 +175,13 @@ static void handle_test_serial() {
         Serial.println("[TEST] Simulated sensor error cleared");
     } else if (cmd == "HELP") {
         Serial.println("\n=== Test Mode Commands ===");
-        Serial.println("  CUP ON / CUP OFF     — simulate cup detection");
-        Serial.println("  HAND ON / HAND OFF   — simulate hand detection");
-        Serial.println("  WATER=<0-100>        — simulate water level");
-        Serial.println("  SENSOR ERROR         — simulate sensor error");
-        Serial.println("  SENSOR OK            — clear sensor error");
-        Serial.println("  HELP                 — show this help");
+        Serial.println("  CONTAINER ON / OFF    — simulate container presence");
+        Serial.println("  HAND ON / OFF         — simulate hand detection (diagnostic)");
+        Serial.println("  WATER=<0-100>         — simulate water level");
+        Serial.println("  DISPENSE[=cup|tumbler]— local dispense trigger (runs local safety)");
+        Serial.println("  SENSOR ERROR          — simulate sensor error");
+        Serial.println("  SENSOR OK             — clear sensor error");
+        Serial.println("  HELP                  — show this help");
         Serial.println("  (Use newline or Enter after each command)");
         Serial.println("==========================\n");
     } else if (cmd.length() > 0) {
@@ -204,6 +252,7 @@ void setup() {
         #endif
         _last_heartbeat = millis();
         _last_telemetry = millis();
+        _last_command_poll = millis();
     } else {
         Serial.println("[BOOT] Wi-Fi connection failed. Operating in local-only mode.");
         dispenser_set_state(STATE_READY); // Still operate locally
@@ -238,6 +287,7 @@ void loop() {
         #endif
         _last_heartbeat = now;
         _last_telemetry = now;
+        _last_command_poll = now;
     }
 
     // ── 2. Local dispenser logic (ALWAYS runs) ───────
@@ -257,18 +307,26 @@ void loop() {
         _last_telemetry = now;
         send_telemetry();
     }
+
+    // Claim any dispense command queued by the web UI
+    if (wifi_is_connected() && (now - _last_command_poll >= COMMAND_POLL_INTERVAL_MS)) {
+        _last_command_poll = now;
+        poll_commands();
+    }
     #endif
 
     // ── 5. Serial diagnostics ────────────────────────
     static unsigned long _last_print = 0;
     if (now - _last_print >= 5000) {
         _last_print = now;
-        Serial.printf("[STATUS] State: %s | Cup: %s | Hand: %s | Water: %d%% | Pump: %s | Wi-Fi: %s\n",
+        Serial.printf("[STATUS] State: %s | Container: %s | Water: %d%% | Measured: %d/%d mL | Pump: %s | LoadCell: %s | Wi-Fi: %s\n",
                       dispenser_state_name(state),
-                      dispenser_get_cup() ? "YES" : "NO",
-                      dispenser_get_hand() ? "YES" : "NO",
+                      dispenser_get_container() ? "YES" : "NO",
                       dispenser_get_water_level(),
+                      dispenser_get_measured_ml(),
+                      dispenser_get_target_ml(),
                       dispenser_get_pump() ? "ON" : "OFF",
+                      load_cell_status(),
                       wifi_is_connected() ? "OK" : "DOWN");
     }
 }

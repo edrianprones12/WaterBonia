@@ -3,13 +3,17 @@
  *
  * All behavior/timing settings centralized here.
  * Hardware pins are in hardware_config.h — do NOT put pins here.
+ *
+ * Dispensing v2:
+ *   Choose container (web) → Place container (sensor)
+ *   → Dispense (web command) → auto-stop at target (load cell)
  */
 
 #ifndef CONFIG_H
 #define CONFIG_H
 
 // ── Firmware Identity ────────────────────────────────────
-#define FIRMWARE_VERSION       "0.1.0"
+#define FIRMWARE_VERSION       "0.2.0"
 #define SYSTEM_NAME            "WaterBonia"
 
 // ── Wi-Fi Settings ───────────────────────────────────────
@@ -32,19 +36,31 @@
 #define HEARTBEAT_INTERVAL_MS  30000    // Heartbeat every 30 seconds
 #define TELEMETRY_INTERVAL_MS  5000     // Sensor reading every 5 seconds
 
-// ── Hand Detection (HC-SR04) ─────────────────────────────
-// Detection range in centimeters.
-// Original concept: 2-10 cm range for hand proximity.
+// How often the ESP32 polls the server for a dispense command.
+// The web UI queues a command; the ESP32 claims it here.
+#define COMMAND_POLL_INTERVAL_MS 2000
+
+// ── Container Detection ──────────────────────────────────
+// Presence-only sensor (IR / IR-breakbeam / limit switch).
+// It does NOT classify cup vs tumbler — the web user chooses the type.
+// Set to 1 if the sensor outputs LOW when a container is present.
+#define CONTAINER_SENSOR_ACTIVE_LOW 0
+
+// Legacy alias: older code and telemetry used the name "cup_detected".
+#define CUP_SENSOR_ACTIVE_LOW  CONTAINER_SENSOR_ACTIVE_LOW
+
+// ── Hand Detection (HC-SR04, optional / diagnostic only) ──
+// NOTE: Hand detection is NOT a dispense trigger in v2.
+// It is kept for diagnostics and future optional gestures.
 #define HAND_MIN_DISTANCE_CM   2.0f
 #define HAND_MAX_DISTANCE_CM   10.0f
-
-// ── Cup Detection ────────────────────────────────────────
-// Set to 1 if IR sensor outputs LOW when cup is detected.
-#define CUP_SENSOR_ACTIVE_LOW  0
 
 // ── Debounce / Stability ─────────────────────────────────
 // Number of consecutive readings required to confirm a state change.
 #define SENSOR_DEBOUNCE_COUNT  3
+
+// Container presence must be stable this long before READY → CONTAINER_DETECTED.
+#define CONTAINER_STABLE_MS    300
 
 // ── Water Level Thresholds ───────────────────────────────
 // Two distinct thresholds with different purposes:
@@ -65,10 +81,44 @@
 #define WATER_LEVEL_ADC_MIN    0
 #define WATER_LEVEL_ADC_MAX    4095
 
+// ── Dispense Targets (local fallback only) ───────────────
+// The SERVER is the authoritative source for target volume
+// (system_settings.container_cup_target_ml / container_tumbler_target_ml).
+// These values are only used when the device is offline and a
+// local trigger must fall back to a safe default.
+#define DEFAULT_CONTAINER_TYPE "cup"
+#define DEFAULT_TARGET_ML      250
+#define MAX_TARGET_ML          2000
+
+// ── Load Cell (HX711) ────────────────────────────────────
+// Measured water weight in grams ≈ millilitres (density ≈ 1 g/mL).
+// CALIBRATION FACTOR IS HARDWARE-SPECIFIC.
+// The placeholder below is NOT a calibrated value — replace it after
+// calibrating with a known reference weight. Tare is performed at the
+// start of every dispensing session.
+#define LOAD_CELL_CALIBRATION_FACTOR  1.0f
+
+// Reading considered "stable enough" to compare against target (grams).
+#define LOAD_CELL_SETTLE_MS     150
+#define LOAD_CELL_SAMPLE_MS     20
+
+// Minimum measured weight before the target check engages.
+// Guards against tare drift starting an instant "completion".
+#define LOAD_CELL_MIN_VALID_G   1.0f
+
+// If the load cell reports an error, the pump MUST NOT run.
+// Set to 1 only for bench testing without a load cell installed.
+// NEVER enable in production — auto-stop at target depends on it.
+#define ALLOW_DISPENSE_WITHOUT_LOAD_CELL  0
+
 // ── Pump Safety ──────────────────────────────────────────
 // Maximum continuous pump runtime in milliseconds.
 // The pump MUST stop after this duration regardless of sensor state.
 #define MAX_DISPENSE_TIME_MS   30000    // 30 seconds max
+
+// ── Complete State Hold ──────────────────────────────────
+// How long the "complete" LED/status is shown before returning to READY.
+#define COMPLETE_HOLD_MS       4000
 
 // ── Relay Logic ──────────────────────────────────────────
 // Set to 1 if relay module is active-low (LOW = pump ON).
@@ -79,16 +129,17 @@
 #define RGB_LED_COMMON_ANODE   0
 
 // ── State Machine ────────────────────────────────────────
-// Dispenser states
+// Dispenser states (v2)
 enum DispenserState {
     STATE_INIT,
     STATE_WIFI_CONNECTING,
-    STATE_READY,              // No cup — pump OFF
-    STATE_CUP_DETECTED,       // Cup present — pump OFF, evaluate stability
-    STATE_WAITING_FOR_HAND,   // Cup present, hand not yet detected — pump OFF
-    STATE_DISPENSING,         // Cup + hand + sufficient water — pump ON
-    STATE_LOW_WATER,          // Water too low — pump OFF
-    STATE_ERROR               // Sensor or system error — pump OFF
+    STATE_READY,                // No container — pump OFF
+    STATE_CONTAINER_DETECTED,   // Container present, stabilising — pump OFF
+    STATE_WAITING_FOR_COMMAND,  // Container ready, awaiting dispense command — pump OFF
+    STATE_DISPENSING,           // Pump ON, load cell measuring to target
+    STATE_COMPLETE,             // Target reached — pump OFF, brief hold
+    STATE_LOW_WATER,            // Water too low — pump OFF
+    STATE_ERROR                 // Sensor/system fault — pump OFF
 };
 
 // ── Test Mode ────────────────────────────────────────────

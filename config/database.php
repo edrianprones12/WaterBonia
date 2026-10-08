@@ -24,6 +24,17 @@ function db(): PDO
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
             PDO::ATTR_EMULATE_PREPARES   => false,
         ]);
+
+        // Keep MySQL's NOW() in sync with PHP's clock. All application
+        // timestamps are written with date(), so the DB session must use
+        // the same offset — otherwise NOW()-based logic (e.g. command
+        // expiry) evaluates against a different time than the app writes.
+        $offset = date('P');
+        if ($offset && $offset !== '+00:00') {
+            $pdo->exec('SET time_zone = ' . $pdo->quote($offset));
+        } else {
+            $pdo->exec("SET time_zone = '+00:00'");
+        }
     }
     return $pdo;
 }
