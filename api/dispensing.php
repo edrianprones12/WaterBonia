@@ -35,71 +35,51 @@ function handle_dispensing_start(array $auth): void
         }
     }
 
-    // Validate target_amount_ml (server-side authoritative target also checked)
-    if (isset($body['target_amount_ml']) && $body['target_amount_ml'] !== null) {
-        if (!is_numeric($body['target_amount_ml']) || (int)$body['target_amount_ml'] < 1 || (int)$body['target_amount_ml'] > 2000) {
-            $errors['target_amount_ml'] = 'Must be between 1 and 2000 mL.';
-        } else {
-            $body['target_amount_ml'] = (int)$body['target_amount_ml'];
-        }
-    }
-
-    // Validate water_level_before
-    if (isset($body['water_level_before']) && $body['water_level_before'] !== null) {
-        $err = validate_range($body['water_level_before'], 0, 100, 'water_level_before');
-        if ($err) $errors['water_level_before'] = $err;
-        else $body['water_level_before'] = (int)$body['water_level_before'];
-    }
+    $command_id = portal_integer($body['command_id'] ?? null);
+    if (!$command_id) $errors['command_id'] = 'A claimed dispensing command is required.';
+    $requested_target = portal_integer($body['target_amount_ml'] ?? null);
+    if ($requested_target === null || $requested_target < 1 || $requested_target > 2000) $errors['target_amount_ml'] = 'Must be a whole-number fill amount between 1 and 2000 mL.';
 
     if (!empty($errors)) {
         api_error('Validation failed', 422, $errors);
     }
 
-    // Server determines/authorizes target from container_type — never trusts
-    // the browser's target blindly. If a command exists for this device, use it.
-    $container_type = $body['container_type'] ?? null;
-    $target_ml = null;
-    if ($container_type) {
-        $setting_key = 'container_' . $container_type . '_target_ml';
-        $target_ml = (int)get_setting($setting_key, $container_type === 'tumbler' ? '500' : '250');
-    }
-
-    // Check if there's already an active session for this device
-    $active = db_fetch(
-        "SELECT id FROM dispensing_sessions WHERE device_id = ? AND status = 'started' LIMIT 1",
-        [$device_id]
-    );
-    if ($active) {
-        api_error('An active dispensing session already exists. Complete or interrupt it first.', 409);
-    }
-
-    $session_id = db_insert('dispensing_sessions', [
-        'device_id'          => $device_id,
-        'started_at'         => date('Y-m-d H:i:s'),
-        'cup_detected'       => ($body['container_detected'] ?? $body['cup_detected'] ?? true) ? 1 : 0,
-        'hand_detected'      => 0,
-        'water_level_before' => $body['water_level_before'] ?? null,
-        'container_type'     => $container_type,
-        'target_amount_ml'   => $target_ml,
-        'status'             => 'started',
-    ]);
-
-    // Link the claimed command to this session
-    if (!empty($body['command_id'])) {
-        $cmd = db_fetch(
-            "SELECT id, device_id, status FROM device_commands WHERE id = ?",
-            [(int)$body['command_id']]
-        );
-        if ($cmd && (int)$cmd['device_id'] === $device_id && $cmd['status'] === 'claimed') {
-            db_update('device_commands',
-                ['status' => 'completed', 'session_id' => $session_id, 'completed_at' => date('Y-m-d H:i:s')],
-                'id = ?', [$cmd['id']]);
+    // Lock in the same device-first order as queue/claim. A session can only
+    // consume its authenticated device's claimed, matching immutable command.
+    db()->beginTransaction();
+    try {
+        $device = db_fetch('SELECT * FROM devices WHERE id = ? FOR UPDATE', [$device_id]);
+        $cmd = db_fetch('SELECT * FROM device_commands WHERE id = ? AND device_id = ? FOR UPDATE', [$command_id, $device_id]);
+        [$authorized, $reason, $target_ml] = portal_session_start_target($cmd, $device_id, $body['container_type'] ?? null, $requested_target);
+        if (!$authorized) {
+            db()->rollBack();
+            api_error($reason, 409);
         }
+        $container_type = $cmd['container_type'];
+        $reading = db_fetch('SELECT * FROM sensor_readings WHERE device_id = ? ORDER BY recorded_at DESC,id DESC LIMIT 1', [$device_id]);
+        $active = db_fetch("SELECT id FROM dispensing_sessions WHERE device_id = ? AND status = 'started' LIMIT 1", [$device_id]);
+        $other = db_fetch("SELECT id FROM device_commands WHERE device_id = ? AND id <> ? AND status IN ('pending','claimed') AND (status = 'claimed' OR expires_at > NOW()) LIMIT 1", [$device_id, $command_id]);
+        $reason = portal_safety_reason($device, $reading, $active, $other, portal_device_safety_alert($device_id), [], $target_ml);
+        if (($body['container_detected'] ?? $body['cup_detected'] ?? null) === false) $reason = 'The device reports that the container is absent.';
+        if ($reason !== null) {
+            db()->rollBack();
+            api_error($reason, 409);
+        }
+        $session_id = db_insert('dispensing_sessions', [
+            'device_id' => $device_id, 'started_at' => date('Y-m-d H:i:s'),
+            'cup_detected' => 1, 'hand_detected' => 0, 'water_level_before' => null,
+            'container_type' => $container_type, 'target_amount_ml' => $target_ml, 'status' => 'started',
+        ]);
+        db_update('device_commands', ['status' => 'completed', 'session_id' => $session_id, 'completed_at' => date('Y-m-d H:i:s')],
+            "id = ? AND device_id = ? AND status = 'claimed'", [$command_id, $device_id]);
+        log_event($device_id, null, 'dispensing_started', 'info',
+            "Dispensing session #{$session_id} started (container: {$container_type}, target: {$target_ml}mL).",
+            ['command_id' => $command_id, 'container_type' => $container_type, 'target_amount_ml' => $target_ml, 'fill_amount_ml' => $target_ml, 'threshold_semantics' => 'fill_volume_ml']);
+        db()->commit();
+    } catch (Throwable $error) {
+        if (db()->inTransaction()) db()->rollBack();
+        api_error('Could not authorize the dispensing session.', 500);
     }
-
-    log_event($device_id, null, 'dispensing_started', 'info',
-        "Dispensing session #{$session_id} started" .
-        ($container_type ? " (container: {$container_type}, target: {$target_ml}mL)" : '') . '.');
 
     api_success([
         'session_id'      => $session_id,
@@ -135,7 +115,7 @@ function handle_dispensing_complete(array $auth): void
     if (!$session) {
         api_error('Dispensing session not found.', 404);
     }
-    if ($session['device_id'] !== $device_id) {
+    if ((int)$session['device_id'] !== $device_id) {
         api_error('This session belongs to another device.', 403);
     }
     if ($session['status'] !== 'started') {
@@ -143,11 +123,6 @@ function handle_dispensing_complete(array $auth): void
     }
 
     // Validate inputs
-    if (isset($body['water_level_after']) && $body['water_level_after'] !== null) {
-        $err = validate_range($body['water_level_after'], 0, 100, 'water_level_after');
-        if ($err) $errors['water_level_after'] = $err;
-        else $body['water_level_after'] = (int)$body['water_level_after'];
-    }
     if (isset($body['amount_dispensed_ml']) && $body['amount_dispensed_ml'] !== null) {
         if (!is_numeric($body['amount_dispensed_ml']) || (int)$body['amount_dispensed_ml'] < 0) {
             $errors['amount_dispensed_ml'] = 'Must be a non-negative number.';
@@ -197,7 +172,7 @@ function handle_dispensing_complete(array $auth): void
         $update_data = [
             'ended_at'            => date('Y-m-d H:i:s'),
             'duration_seconds'    => $duration,
-            'water_level_after'   => $body['water_level_after'] ?? $session['water_level_after'],
+            'water_level_after'   => null,
             'amount_dispensed_ml' => $measured ?? $session['amount_dispensed_ml'],
             'measured_amount_ml'  => $measured,
             'stop_reason'         => $stop_reason,

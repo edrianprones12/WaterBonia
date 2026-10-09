@@ -2,8 +2,8 @@
  * WaterBonia ESP32 - Sensor Module
  *
  * Handles all sensor reading and debouncing.
- * Water-level sensor implementation is isolated for easy replacement.
- * Sensor errors are reported cleanly — never assume tank is full on error.
+ * Reads container presence and optional diagnostic hand detection.
+ * Reservoir water level is not measured by this hardware.
  *
  * v2: container presence is the sensor that gates dispensing.
  *     It reports PRESENCE ONLY — cup vs tumbler is chosen on the web.
@@ -29,10 +29,6 @@ bool sensors_read_cup();
 // NOT a dispense trigger in v2.
 bool sensors_read_hand();
 
-// Read water level as percentage (0-100)
-// Returns -1 on sensor error.
-int sensors_read_water_level();
-
 // Get raw distance from HC-SR04 in cm (for diagnostics)
 float sensors_read_distance_cm();
 
@@ -50,7 +46,6 @@ void sensors_clear_error();
 void sensors_set_sim_container(bool detected);
 void sensors_set_sim_cup(bool detected);      // alias of container
 void sensors_set_sim_hand(bool detected);
-void sensors_set_sim_water_level(int percent);
 void sensors_set_sim_error(bool error);
 #endif
 

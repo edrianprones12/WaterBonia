@@ -62,30 +62,10 @@
 // Container presence must be stable this long before READY → CONTAINER_DETECTED.
 #define CONTAINER_STABLE_MS    300
 
-// ── Water Level Thresholds ───────────────────────────────
-// Two distinct thresholds with different purposes:
-
-// SERVER WARNING THRESHOLD (reference only):
-// When water_level <= this, the WaterBonia server may show a LOW WATER warning.
-// This value is informational — the server-side system_settings.low_water_threshold
-// is the authoritative value for server alerts.
-#define SERVER_LOW_WATER_REFERENCE_PERCENT  20
-
-// LOCAL PUMP SAFETY CUTOFF (authoritative on ESP32):
-// When water_level <= this, the ESP32 MUST force pump OFF.
-// This works even when Wi-Fi and the server are unavailable.
-// This is an independent safety threshold — do NOT depend on the server value.
-#define LOCAL_PUMP_CUTOFF_PERCENT           15
-
-// ADC range for water level sensor (adjust per sensor).
-#define WATER_LEVEL_ADC_MIN    0
-#define WATER_LEVEL_ADC_MAX    4095
-
-// ── Dispense Targets (local fallback only) ───────────────
-// The SERVER is the authoritative source for target volume
-// (system_settings.container_cup_target_ml / container_tumbler_target_ml).
-// These values are only used when the device is offline and a
-// local trigger must fall back to a safe default.
+// ── Dispense Targets ─────────────────────────────────────
+// Production uses the selected target_amount_ml in the claimed server command.
+// No offline production request substitutes a fixed target.
+// Defaults below are for the local TEST_MODE serial trigger only.
 #define DEFAULT_CONTAINER_TYPE "cup"
 #define DEFAULT_TARGET_ML      250
 #define MAX_TARGET_ML          2000
@@ -138,7 +118,6 @@ enum DispenserState {
     STATE_WAITING_FOR_COMMAND,  // Container ready, awaiting dispense command — pump OFF
     STATE_DISPENSING,           // Pump ON, load cell measuring to target
     STATE_COMPLETE,             // Target reached — pump OFF, brief hold
-    STATE_LOW_WATER,            // Water too low — pump OFF
     STATE_ERROR                 // Sensor/system fault — pump OFF
 };
 

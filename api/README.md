@@ -14,7 +14,7 @@ resolve to the same route.
 ## Dispensing v2 Flow
 
 ```
-Web user picks container ──► POST /pages/dispenser-status.php (CSRF, session auth)
+Web user picks container + amount ──► POST /pages/dispenser-status.php (CSRF)
                               inserts a pending row in `device_commands`
                                       │
 ESP32 polls every 2 s ────────────────┘
@@ -28,10 +28,19 @@ ESP32 polls every 2 s ────────────────┘
         POST /api/device/command-result          → command outcome
 ```
 
-The **server is authoritative** for the target volume: it derives
-`target_amount_ml` from `container_type` and the `system_settings` keys
-`container_cup_target_ml` / `container_tumbler_target_ml`. A target sent by a
-client is validated (1–2000 mL) but never blindly trusted.
+The **server is authoritative** for the target volume: it validates the selected
+Cup/Tumbler amount against the configured fill range (initially 1–2000 mL),
+then stores it as `device_commands.target_amount_ml`. Claiming a command and
+starting a session preserve that accepted target. A session requires the same
+device, claimed command, container, and amount; later preferences cannot change
+an active fill. `container_cup_target_ml` / `container_tumbler_target_ml` supply
+initial defaults only. The firmware measures dispensed water with an HX711 load
+cell; no reservoir sensor is installed or required.
+
+The current firmware defers synchronous heartbeat/telemetry calls while its pump
+runs to protect local cutoff checks. Hardware progress readings pause during a
+fill; completion and queued telemetry report the measured result after pump OFF.
+Demo progress remains continuous.
 
 ---
 
@@ -118,7 +127,6 @@ Receives sensor telemetry from the ESP32.
 **Request:**
 ```json
 {
-  "water_level_percent": 72,
   "container_detected": true,
   "hand_detected": false,
   "pump_status": true,
@@ -142,7 +150,7 @@ Receives sensor telemetry from the ESP32.
 **Validation:**
 | Field | Rules |
 |-------|-------|
-| `water_level_percent` | 0–100 or null |
+| `water_level_percent` | Retired; optional legacy input is ignored and stored as null |
 | `battery_percent` | 0–100 or null |
 | `container_detected` | boolean (presence only — never classifies cup vs tumbler) |
 | `cup_detected` | boolean, legacy alias of `container_detected` |
@@ -155,13 +163,13 @@ Receives sensor telemetry from the ESP32.
 - Updates `devices.last_seen_at`
 - When `measured_ml` is supplied and a session is active, updates
   `dispensing_sessions.measured_amount_ml` so the dashboard shows live progress
-- Checks low-water threshold and creates/resolves alerts automatically
+- Accepts telemetry without a reservoir-level field
+- Stores the retained legacy water-level column as null; no low-water alerts are generated
 - Rate limit: 60 requests per 60 seconds
 
-**Low-Water Alert Logic:**
-- If `water_level_percent <= low_water_threshold` and no active `low_water` alert exists → creates alert
-- If `water_level_percent > low_water_threshold` and active `low_water` alert exists → auto-resolves it
-- No duplicate alerts while water remains below threshold
+Existing historical water-level readings and alerts are preserved in the database.
+They do not authorize or block new fills. Presence, pump, freshness, device status,
+and relevant measurement/device error checks remain in effect.
 
 ---
 
@@ -198,7 +206,8 @@ Claims the oldest pending dispense command queued by the web dashboard.
 **Behavior:**
 - Marks pending commands past their TTL (`dispense_command_ttl_sec`, default 30 s) as `expired`
 - Claims the oldest pending command atomically (transaction + `FOR UPDATE`)
-- Derives `target_amount_ml` server-side from `container_type`
+- Validates and preserves the queued `target_amount_ml`, including amounts below initial defaults
+- Rechecks fresh telemetry, presence, device availability, pump/error conditions, and concurrent operations
 - Rate limit: 120 requests per 60 seconds (poll interval 2 s)
 
 ---
@@ -244,7 +253,6 @@ Starts a new dispensing session.
   "container_detected": true,
   "container_type": "cup",
   "target_amount_ml": 250,
-  "water_level_before": 72,
   "command_id": 5
 }
 ```
@@ -268,16 +276,17 @@ Starts a new dispensing session.
 |-------|-------|
 | `container_detected` | boolean, optional |
 | `cup_detected` | boolean, legacy alias |
-| `container_type` | `cup` or `tumbler`, optional |
-| `target_amount_ml` | 1–2000, optional — **the server recomputes the target from `container_type`** |
-| `water_level_before` | 0–100 or null, optional |
-| `command_id` | optional `device_commands.id` to link |
+| `container_type` | Required `cup` or `tumbler`, matching the claimed command |
+| `target_amount_ml` | Required whole-number amount matching the claimed command's immutable target |
+| `water_level_before` | Retired; optional legacy input is ignored and stored as null |
+| `command_id` | Required claimed `device_commands.id` belonging to this device |
 
 **Behavior:**
-- Creates row in `dispensing_sessions` with `status = started`
-- Derives `target_amount_ml` from `system_settings` (browser value is never trusted)
+- Locks the device and matching claimed command; checks authorization, expiry, and current safety state before creating a session
+- Creates row in `dispensing_sessions` with `status = started` using the accepted command target
 - Marks the linked command `completed` and stores `session_id`
-- Rejects if an active session already exists (HTTP 409)
+- Rejects if an active session exists or command/safety requirements fail; rejected starts create no session
+- The production ESP32 keeps its pump OFF until this request returns a successful session
 - Rate limit: 30 requests per 60 seconds
 
 ---
@@ -292,7 +301,6 @@ Completes or interrupts an active dispensing session.
 ```json
 {
   "session_id": 456,
-  "water_level_after": 68,
   "stop_reason": "target_reached",
   "measured_amount_ml": 252,
   "amount_dispensed_ml": 252
@@ -318,7 +326,7 @@ Completes or interrupts an active dispensing session.
 | Field | Rules |
 |-------|-------|
 | `session_id` | Required, must exist, must belong to this device, must be active |
-| `water_level_after` | 0–100 or null |
+| `water_level_after` | Retired; optional legacy input is ignored and stored as null |
 | `measured_amount_ml` | Non-negative integer or null (preferred) |
 | `amount_dispensed_ml` | Non-negative integer or null (legacy alias) |
 | `stop_reason` | One of: `target_reached`, `container_removed`, `timeout`, `low_water`, `manual_stop`, `completed`, `command_expired`, `error`, `cup_removed`, `hand_removed` |
@@ -329,6 +337,9 @@ Completes or interrupts an active dispensing session.
 | `target_reached`, `completed` | `completed` |
 | `container_removed`, `timeout`, `low_water`, `manual_stop`, `command_expired` | `interrupted` |
 | `error` | `failed` |
+
+`low_water` remains accepted for historical device compatibility. Current firmware
+does not emit it and does not perform reservoir-level checks.
 
 **Behavior:**
 - Calculates duration from server timestamps

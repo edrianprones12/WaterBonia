@@ -22,19 +22,21 @@
 // True when the HX711 library is present and the sensor initialised.
 bool load_cell_available();
 
-// Initialise the HX711. Returns true on success.
+// Initialise and tare the HX711. True only after a fresh, finite sample.
+// Sample readiness does not establish physical calibration accuracy.
 bool load_cell_begin();
 
 // Poll for a new sample (call frequently, non-blocking).
 void load_cell_update();
 
-// Latest filtered reading in grams. Returns NAN on error.
+// Latest validated filtered reading in grams. NAN if invalid or stale.
 float load_cell_read_grams();
 
-// Tare (zero) at the current weight. Blocks for the settle window.
+// Tare at the current weight with the pump OFF, then wait up to 500ms
+// for a fresh finite sample. Failed tare leaves load_cell_ok() false.
 void load_cell_tare();
 
-// True when the last reading was valid (not NAN).
+// True only with a successful tare and a fresh finite reading.
 bool load_cell_ok();
 
 // Human-readable status for serial diagnostics.

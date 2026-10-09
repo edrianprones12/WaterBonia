@@ -6,7 +6,7 @@
  *   CYAN                        = container detected / awaiting dispense command
  *   GREEN                       = dispensing
  *   WHITE flashing (with green) = dispense complete
- *   YELLOW                      = low water
+ *   YELLOW flashing             = boot / Wi-Fi connection
  *   RED flashing                = error
  *
  * The LED is an indicator only — it is NOT a safety mechanism.
@@ -88,11 +88,6 @@ void led_update(DispenserState state) {
             } else {
                 led_set_color(0, 255, 0);     // Green
             }
-            break;
-
-        case STATE_LOW_WATER:
-            // Solid yellow — low water warning
-            led_set_color(255, 255, 0);
             break;
 
         case STATE_ERROR:

@@ -47,6 +47,8 @@
 static unsigned long _last_heartbeat = 0;
 static unsigned long _last_telemetry = 0;
 static unsigned long _last_command_poll = 0;
+static bool _heartbeat_deferred = false;
+static bool _telemetry_deferred = false;
 
 // ── Serial Provisioning Trigger ──────────────────────────
 
@@ -74,7 +76,7 @@ static void check_provisioning_trigger() {
 // ── Send Heartbeat ───────────────────────────────────────
 
 static void send_heartbeat() {
-    if (!wifi_is_connected()) return;
+    if (!wifi_is_connected() || dispenser_get_pump()) return;
 
     api_send_heartbeat(
         FIRMWARE_VERSION,
@@ -86,25 +88,21 @@ static void send_heartbeat() {
 // ── Send Telemetry ───────────────────────────────────────
 
 static void send_telemetry() {
-    if (!wifi_is_connected()) return;
-
-    int water = dispenser_get_water_level();
-    if (water < 0) return;   // never report a fabricated level
+    if (!wifi_is_connected() || dispenser_get_pump()) return;
 
     bool container = dispenser_get_container();
     bool hand = dispenser_get_hand();
     bool pump = dispenser_get_pump();
     int measured = dispenser_get_pump() ? dispenser_get_measured_ml() : -1;
 
-    api_send_sensor_reading(water, container, hand, pump, -1, measured);
+    api_send_sensor_reading(container, hand, pump, -1, measured);
 }
 
 // ── Poll for a dispense command (web → ESP32) ───────────
 
 static void poll_commands() {
-    if (!wifi_is_connected()) return;
-    if (dispenser_get_state() == STATE_DISPENSING) return;
-    if (dispenser_get_state() == STATE_WIFI_CONNECTING) return;
+    if (!wifi_is_connected() || dispenser_get_pump()) return;
+    if (dispenser_get_state() != STATE_WAITING_FOR_COMMAND) return;
     if (dispenser_has_pending_request()) return;
     if (!dispenser_get_container()) return;   // nothing to fill
 
@@ -145,14 +143,6 @@ static void handle_test_serial() {
     } else if (cmd == "HAND OFF" || cmd == "HAND=0") {
         sensors_set_sim_hand(false);
         Serial.println("[TEST] Simulated hand: NOT DETECTED");
-    } else if (cmd.startsWith("WATER=")) {
-        int val = cmd.substring(6).toInt();
-        if (val >= 0 && val <= 100) {
-            sensors_set_sim_water_level(val);
-            Serial.printf("[TEST] Simulated water level: %d%%\n", val);
-        } else {
-            Serial.println("[TEST] Invalid water level. Use WATER=0 to WATER=100");
-        }
     } else if (cmd.startsWith("DISPENSE")) {
         // Local test trigger — bypasses the server, still runs all
         // local safety checks inside dispenser_request_dispense().
@@ -177,7 +167,6 @@ static void handle_test_serial() {
         Serial.println("\n=== Test Mode Commands ===");
         Serial.println("  CONTAINER ON / OFF    — simulate container presence");
         Serial.println("  HAND ON / OFF         — simulate hand detection (diagnostic)");
-        Serial.println("  WATER=<0-100>         — simulate water level");
         Serial.println("  DISPENSE[=cup|tumbler]— local dispense trigger (runs local safety)");
         Serial.println("  SENSOR ERROR          — simulate sensor error");
         Serial.println("  SENSOR OK             — clear sensor error");
@@ -276,10 +265,10 @@ void loop() {
     #endif
 
     // ── 1. Wi-Fi management ──────────────────────────
-    wifi_loop();
+    if (!dispenser_get_pump()) wifi_loop();
 
     // If we were in WIFI_CONNECTING and now connected, transition
-    if (dispenser_state_name(dispenser_get_state()) == "WIFI_CONNECTING" &&
+    if (dispenser_get_state() == STATE_WIFI_CONNECTING &&
         wifi_is_connected()) {
         dispenser_set_state(STATE_READY);
         #if !TEST_MODE || ENABLE_API_TEST_REQUESTS
@@ -296,22 +285,30 @@ void loop() {
     // ── 3. Status LED ────────────────────────────────
     led_update(state);
 
-    // ── 4. API communication (non-blocking) ──────────
+    // ── 4. API communication while pump OFF ──────────
+    // HTTPClient is synchronous. Defer requests during a fill so a network
+    // timeout cannot delay local measurement, presence or pump-timeout checks.
     #if !TEST_MODE || ENABLE_API_TEST_REQUESTS
-    if (wifi_is_connected() && (now - _last_heartbeat >= HEARTBEAT_INTERVAL_MS)) {
-        _last_heartbeat = now;
-        send_heartbeat();
-    }
-
-    if (wifi_is_connected() && (now - _last_telemetry >= TELEMETRY_INTERVAL_MS)) {
-        _last_telemetry = now;
-        send_telemetry();
-    }
-
-    // Claim any dispense command queued by the web UI
-    if (wifi_is_connected() && (now - _last_command_poll >= COMMAND_POLL_INTERVAL_MS)) {
-        _last_command_poll = now;
-        poll_commands();
+    if (dispenser_get_pump()) {
+        // Send an OFF reading immediately when the fill stops, even if it was brief.
+        _telemetry_deferred = true;
+        if (now - _last_heartbeat >= HEARTBEAT_INTERVAL_MS) _heartbeat_deferred = true;
+    } else if (wifi_is_connected()) {
+        if (_telemetry_deferred || now - _last_telemetry >= TELEMETRY_INTERVAL_MS) {
+            _last_telemetry = now;
+            send_telemetry();
+            _telemetry_deferred = false;
+        }
+        if (_heartbeat_deferred || now - _last_heartbeat >= HEARTBEAT_INTERVAL_MS) {
+            _last_heartbeat = now;
+            send_heartbeat();
+            _heartbeat_deferred = false;
+        }
+        // Only claim a command after the container has finished stabilizing.
+        if (now - _last_command_poll >= COMMAND_POLL_INTERVAL_MS) {
+            _last_command_poll = now;
+            poll_commands();
+        }
     }
     #endif
 
@@ -319,10 +316,9 @@ void loop() {
     static unsigned long _last_print = 0;
     if (now - _last_print >= 5000) {
         _last_print = now;
-        Serial.printf("[STATUS] State: %s | Container: %s | Water: %d%% | Measured: %d/%d mL | Pump: %s | LoadCell: %s | Wi-Fi: %s\n",
+        Serial.printf("[STATUS] State: %s | Container: %s | Measured: %d/%d mL | Pump: %s | LoadCell: %s | Wi-Fi: %s\n",
                       dispenser_state_name(state),
                       dispenser_get_container() ? "YES" : "NO",
-                      dispenser_get_water_level(),
                       dispenser_get_measured_ml(),
                       dispenser_get_target_ml(),
                       dispenser_get_pump() ? "ON" : "OFF",

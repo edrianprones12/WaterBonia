@@ -30,12 +30,6 @@
 // Legacy alias (older code referenced PIN_CUP_SENSOR).
 #define PIN_CUP_SENSOR         PIN_CONTAINER_SENSOR
 
-// ── Water Level Sensor ───────────────────────────────────
-// Placeholder pins — adjust when final sensor is selected.
-// For analog sensors: use ADC-capable pins (GPIO 32-39 on ESP32).
-// For digital/serial sensors: adjust pins and protocol accordingly.
-#define PIN_WATER_LEVEL_ANALOG 34   // ADC1 channel (safe for Wi-Fi)
-
 // ── HX711 Load Cell Amplifier ────────────────────────────
 // *** PLACEHOLDER PINS — NOT YET WIRED / NOT FINALIZED. ***
 // Confirm these against your final schematic before powering hardware.

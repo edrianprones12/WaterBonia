@@ -1,9 +1,8 @@
 /**
  * WaterBonia ESP32 - Sensor Implementation
  *
- * Water-level sensor is abstracted for easy replacement.
- * Current implementation: analog water-level sensor on ADC pin.
- * To use a different sensor model, replace the functions below.
+ * The hardware reads container presence and optional diagnostic hand distance.
+ * It has no reservoir water-level sensor.
  *
  * v2: the container sensor reports PRESENCE ONLY. It does not
  *     distinguish a cup from a tumbler — the web user chooses the
@@ -34,13 +33,11 @@ static bool _sensor_error = false;
 #if TEST_MODE
 static bool _sim_container = false;
 static bool _sim_hand = false;
-static int  _sim_water_level = 50;
 static bool _sim_error = false;
 
 void sensors_set_sim_container(bool detected)  { _sim_container = detected; }
 void sensors_set_sim_cup(bool detected)        { _sim_container = detected; }
 void sensors_set_sim_hand(bool detected)       { _sim_hand = detected; }
-void sensors_set_sim_water_level(int pct)      { _sim_water_level = constrain(pct, 0, 100); }
 void sensors_set_sim_error(bool error)         { _sim_error = error; }
 #endif
 
@@ -54,9 +51,6 @@ void sensors_init() {
 
     // Container presence sensor
     pinMode(PIN_CONTAINER_SENSOR, INPUT);
-
-    // Water level analog
-    // ESP32 ADC pins don't need explicit pinMode for analogRead
 
     // Pump relay — safe default OFF
     pinMode(PIN_PUMP_RELAY, OUTPUT);
@@ -173,49 +167,12 @@ bool sensors_read_cup() {
     return sensors_read_container();
 }
 
-// ── Water Level Sensor ───────────────────────────────────
-// REPLACE this implementation when the final sensor model is selected.
-// Current: simple analog water-level sensor.
-//
-// For different sensor types:
-// - Ultrasonic water-level: use distance measurement
-// - Float switch: use digital read with thresholds
-// - Capacitive: use analog with calibration curve
-// - Serial/UART sensor: use protocol-specific read
-
-int sensors_read_water_level() {
-    #if TEST_MODE
-    return _sim_water_level;
-    #else
-    int raw = analogRead(PIN_WATER_LEVEL_ANALOG);
-
-    // Validate ADC reading
-    if (raw < WATER_LEVEL_ADC_MIN || raw > WATER_LEVEL_ADC_MAX) {
-        _sensor_error = true;
-        Serial.println("[SENSOR] Water level reading out of range.");
-        return -1;
-    }
-
-    // Map ADC value to percentage
-    // NOTE: Calibrate these values for your specific sensor.
-    // Different water-level sensors have different output curves.
-    int percent = map(raw, WATER_LEVEL_ADC_MIN, WATER_LEVEL_ADC_MAX, 0, 100);
-    percent = constrain(percent, 0, 100);
-
-    return percent;
-    #endif
-}
-
 // ── Error State ──────────────────────────────────────────
 
 bool sensors_has_error() {
     #if TEST_MODE
     return _sim_error;
     #else
-    int water = sensors_read_water_level();
-    if (water < 0) {
-        _sensor_error = true;
-    }
     return _sensor_error;
     #endif
 }

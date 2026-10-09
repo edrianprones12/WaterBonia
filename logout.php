@@ -9,5 +9,5 @@ session_destroy();
 header('Cache-Control: no-cache, no-store, must-revalidate');
 header('Pragma: no-cache');
 header('Expires: 0');
-// Logout always returns to the Admin Portal entry point (admin login).
-redirect('/admin/');
+// Return to the primary dispensing experience after ending a session.
+redirect('/pages/dispense.php');

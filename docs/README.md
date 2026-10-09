@@ -2,6 +2,8 @@
 
 This folder contains project documentation, including IT 114 HCI materials.
 
+The current implementation is described in [Dispensing revision](execution-portal-revision.md) and [Layout optimization](execution-portal-layout-optimization.md).
+
 ## IT 114 - Advanced Human and Computer Interaction
 
 Place your IT 114 documentation files in this folder:
@@ -18,7 +20,7 @@ The IT 114 documentation should cover:
 - **Information Architecture** review of navigation and page structure
 - **Feedback Systems** analysis (LED states, dashboard updates, alerts)
 - **Error Prevention** design (pump safety invariant, input validation)
-- **Status Visibility** (device status, water levels, active alerts)
+- **Status Visibility** (device connection, container presence, pump status, selected fill amount, and measured results)
 - **Responsive Design** considerations for mobile/tablet/desktop
 - **Accessibility** review of the web interface
 - **User-Centered Design** decisions throughout development

@@ -12,6 +12,7 @@ $_SERVER['SCRIPT_NAME'] = $_SERVER['SCRIPT_NAME'] ?? '/api';
 
 // Load database config (defines constants and db())
 require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../config/portal.php';
 
 /* ── Authorization Header Normalisation ───────────────── */
 // Some Apache/mod_php setups do not export the Authorization header to

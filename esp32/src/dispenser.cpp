@@ -15,7 +15,6 @@
  *   Pump ON is permitted ONLY when:
  *     container_detected == true
  *     AND an accepted dispense request is active
- *     AND water_level > LOCAL_PUMP_CUTOFF_PERCENT
  *     AND load cell samples are valid (see ALLOW_DISPENSE_WITHOUT_LOAD_CELL)
  *     AND dispense timeout has not been exceeded
  *     AND no emergency stop is active
@@ -38,7 +37,6 @@ static DispenserState _prev_state = STATE_INIT;
 // Sensor readings (latest)
 static bool _container = false;
 static bool _hand = false;
-static int  _water_level = -1;
 
 // Pump
 static bool _pump_on = false;
@@ -127,13 +125,12 @@ static void reset_request() {
 
 static void finish_session(const char *stop_reason) {
     int measured = _measured_ml;
-    int water = _water_level >= 0 ? _water_level : 0;
 
     pump_off();
 
     #if !TEST_MODE || ENABLE_API_TEST_REQUESTS
     if (_active_session_id > 0) {
-        api_dispensing_complete(_active_session_id, water, stop_reason, measured);
+        api_dispensing_complete(_active_session_id, stop_reason, measured);
     }
     if (_command_id > 0) {
         // 'completed' only on target reached; everything else is a local stop.
@@ -156,7 +153,6 @@ void dispenser_init() {
     _prev_state = STATE_INIT;
     _container = false;
     _hand = false;
-    _water_level = -1;
     _active_session_id = 0;
     reset_request();
     load_cell_begin();
@@ -170,7 +166,7 @@ bool dispenser_request_dispense(const char *container_type, int target_ml, long 
         Serial.println("[DISPENSER] Request rejected: dispensing already in progress.");
         return false;
     }
-    if (_state == STATE_LOW_WATER || _state == STATE_ERROR) {
+    if (_state == STATE_ERROR) {
         Serial.printf("[DISPENSER] Request rejected: state is %s.\n",
                       dispenser_state_name(_state));
         return false;
@@ -185,10 +181,6 @@ bool dispenser_request_dispense(const char *container_type, int target_ml, long 
     }
     if (target_ml <= 0 || target_ml > MAX_TARGET_ML) {
         Serial.printf("[DISPENSER] Request rejected: target %d mL out of range.\n", target_ml);
-        return false;
-    }
-    if (_water_level >= 0 && _water_level <= LOCAL_PUMP_CUTOFF_PERCENT) {
-        Serial.println("[DISPENSER] Request rejected: water level too low.");
         return false;
     }
     #if !ALLOW_DISPENSE_WITHOUT_LOAD_CELL
@@ -216,13 +208,12 @@ DispenserState dispenser_loop() {
     // ── Read sensors ─────────────────────────────────
     _container = sensors_read_container();
     _hand = sensors_read_hand();
-    _water_level = sensors_read_water_level();
 
     // Keep the load cell sampling while idle so a request can start immediately.
     load_cell_update();
 
-    // ── Emergency: water-level sensor error → pump OFF ──
-    if (_water_level < 0 || sensors_has_error()) {
+    // ── Emergency: sensor error → pump OFF ───────────────
+    if (sensors_has_error()) {
         if (_pump_on) {
             Serial.println("[SAFETY] Sensor error — stopping pump.");
             finish_session("error");
@@ -237,16 +228,6 @@ DispenserState dispenser_loop() {
         finish_session("timeout");
         set_state(STATE_COMPLETE);
         _complete_since = millis();
-        return _state;
-    }
-
-    // ── Low water check ──────────────────────────────
-    if (_water_level <= LOCAL_PUMP_CUTOFF_PERCENT) {
-        if (_pump_on) {
-            Serial.println("[SAFETY] Low water — stopping pump.");
-            finish_session("low_water");
-        }
-        set_state(STATE_LOW_WATER);
         return _state;
     }
 
@@ -279,6 +260,12 @@ DispenserState dispenser_loop() {
 
         case STATE_CONTAINER_DETECTED:
             if (!_container) {
+                if (_pending_request && _pending_command_id > 0) {
+                    #if !TEST_MODE || ENABLE_API_TEST_REQUESTS
+                    api_command_result(_pending_command_id, "cancelled", 0, "container_removed");
+                    #endif
+                }
+                reset_request();
                 _container_since = 0;
                 set_state(STATE_READY);
             } else if (millis() - _container_since >= CONTAINER_STABLE_MS) {
@@ -311,11 +298,18 @@ DispenserState dispenser_loop() {
                 load_cell_tare();
                 load_cell_update();
 
-                // Open the API session (server may override the target).
+                // Open the session; the server confirms the claimed command's target.
                 #if !TEST_MODE || ENABLE_API_TEST_REQUESTS
                 int reported_target = _target_ml;
                 _active_session_id = api_dispensing_start(
-                    _container, _water_level, _active_container, _command_id, reported_target);
+                    _container, _active_container, _command_id, reported_target);
+                if (_active_session_id <= 0) {
+                    Serial.println("[SAFETY] Session start rejected — pump remains OFF.");
+                    if (_command_id > 0) api_command_result(_command_id, "rejected", 0, "session_start_failed");
+                    reset_request();
+                    set_state(STATE_ERROR);
+                    break;
+                }
                 if (reported_target > 0 && reported_target <= MAX_TARGET_ML) {
                     _target_ml = reported_target;
                 }
@@ -324,6 +318,18 @@ DispenserState dispenser_loop() {
                 Serial.println("[API] Test mode — dispensing start skipped.");
                 #endif
 
+                // Tare/API calls may take time; refresh local guards before pump ON.
+                _container = sensors_read_container();
+                load_cell_update();
+                if (!_container || sensors_has_error()
+                    #if !ALLOW_DISPENSE_WITHOUT_LOAD_CELL
+                    || !load_cell_ok()
+                    #endif
+                ) {
+                    finish_session(_container ? "error" : "container_removed");
+                    set_state(_container ? STATE_ERROR : STATE_READY);
+                    break;
+                }
                 pump_on();
                 set_state(STATE_DISPENSING);
                 Serial.printf("[DISPENSER] Dispensing %s → %d mL\n",
@@ -373,14 +379,8 @@ DispenserState dispenser_loop() {
             }
             break;
 
-        case STATE_LOW_WATER:
-            if (_water_level > LOCAL_PUMP_CUTOFF_PERCENT) {
-                set_state(STATE_READY);
-            }
-            break;
-
         case STATE_ERROR:
-            if (!sensors_has_error() && _water_level >= 0
+            if (!sensors_has_error()
                 #if !ALLOW_DISPENSE_WITHOUT_LOAD_CELL
                 && load_cell_ok()
                 #endif
@@ -405,7 +405,6 @@ const char* dispenser_state_name(DispenserState state) {
         case STATE_WAITING_FOR_COMMAND:  return "WAITING_FOR_COMMAND";
         case STATE_DISPENSING:           return "DISPENSING";
         case STATE_COMPLETE:             return "COMPLETE";
-        case STATE_LOW_WATER:            return "LOW_WATER";
         case STATE_ERROR:                return "ERROR";
         default:                         return "UNKNOWN";
     }
@@ -414,7 +413,6 @@ const char* dispenser_state_name(DispenserState state) {
 DispenserState dispenser_get_state()   { return _state; }
 bool dispenser_get_container()         { return _container; }
 bool dispenser_get_hand()              { return _hand; }
-int  dispenser_get_water_level()       { return _water_level; }
 bool dispenser_get_pump()              { return _pump_on; }
 int  dispenser_get_measured_ml()       { return _measured_ml; }
 int  dispenser_get_target_ml()        { return _target_ml; }

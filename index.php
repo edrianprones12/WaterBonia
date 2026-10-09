@@ -4,9 +4,7 @@
  *
  * "/"  →  EXECUTION PORTAL (user dispensing experience)
  *
- * The Execution Portal is public: it does not require an administrator
- * login. Administration is reached through the "Admin portal" button,
- * which points at /admin/.
+ * The Execution Portal is public and opens without a login.
  */
 require_once __DIR__ . '/includes/functions.php';
 

@@ -30,9 +30,9 @@ bool api_send_heartbeat(const String &firmware_version,
                         const String &ip_address,
                         const String &wifi_ssid);
 
-// Send sensor reading (measured_ml = live load-cell reading, -1 if none)
-bool api_send_sensor_reading(int water_level_percent,
-                             bool container_detected,
+// Send presence/pump telemetry (measured_ml = live load-cell reading, -1 if none).
+// Reservoir water fields are omitted because no level sensor is fitted.
+bool api_send_sensor_reading(bool container_detected,
                              bool hand_detected,
                              bool pump_status,
                              int battery_percent,
@@ -49,17 +49,14 @@ bool api_command_result(long command_id,
                         const String &reason);
 
 // Start a dispensing session, returns session ID (0 on failure).
-// `target_ml` is passed in and updated to the SERVER's authoritative
-// target when the server responds with one.
+// `target_ml` comes from the claimed command and is confirmed by the server.
 long api_dispensing_start(bool container_detected,
-                          int water_level_before,
                           const String &container_type,
                           long command_id,
                           int &target_ml);
 
 // Complete a dispensing session with the measured volume
 bool api_dispensing_complete(long session_id,
-                             int water_level_after,
                              const String &stop_reason,
                              int measured_ml);
 

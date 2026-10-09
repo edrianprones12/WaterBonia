@@ -15,15 +15,13 @@
  *   INIT → WIFI_CONNECTING → READY
  *   READY → CONTAINER_DETECTED → WAITING_FOR_COMMAND → DISPENSING
  *   DISPENSING → COMPLETE (target reached) → READY
- *   any state → LOW_WATER (water below local cutoff)
  *   any state → ERROR (sensor/load-cell fault)
- *   LOW_WATER / ERROR → READY (when recovered)
+ *   ERROR → READY (when recovered)
  *
  * PUMP SAFETY INVARIANT (must hold at ALL times):
  *   Pump ON is permitted ONLY when:
  *     container_detected == true
  *     AND an accepted dispense request is active
- *     AND water_level > LOCAL_PUMP_CUTOFF_PERCENT
  *     AND the load cell is reporting valid samples
  *           (unless ALLOW_DISPENSE_WITHOUT_LOAD_CELL is set for bench tests)
  *     AND dispense timeout has not been exceeded
@@ -61,9 +59,6 @@ bool dispenser_get_container();
 
 // Hand presence (diagnostic only — never a dispense trigger)
 bool dispenser_get_hand();
-
-// Current water level (last reading), -1 on error
-int dispenser_get_water_level();
 
 // Current pump state
 bool dispenser_get_pump();

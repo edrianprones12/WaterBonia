@@ -34,19 +34,17 @@ function handle_poll_command(array $auth): void
     // exactly one activity event and one deduplicated alert per expiry wave.
     $expired_stmt = db()->prepare(
         "SELECT id, container_type, target_amount_ml FROM device_commands
-          WHERE device_id = ? AND status = 'pending' AND expires_at < NOW()"
+          WHERE device_id = ? AND status = 'pending' AND expires_at <= NOW()"
     );
     $expired_stmt->execute([$device_id]);
     $expired = $expired_stmt->fetchAll(PDO::FETCH_ASSOC);
     if ($expired) {
-        db_update(
-            'device_commands',
-            ['status' => 'expired'],
-            "device_id = ? AND status = 'pending' AND expires_at < NOW()",
-            [$device_id]
-        );
-
+        $expired_count = 0;
         foreach ($expired as $stale) {
+            $changed = db_update('device_commands', ['status' => 'expired'],
+                "id = ? AND device_id = ? AND status = 'pending' AND expires_at <= NOW()", [$stale['id'], $device_id]);
+            if (!$changed) continue; // another poll or kiosk already recorded it
+            $expired_count++;
             log_event($device_id, null, 'command_expired', 'warning',
                 "Command #{$stale['id']} expired before the device claimed it " .
                 "(container: {$stale['container_type']}, target: {$stale['target_amount_ml']}mL).");
@@ -56,8 +54,8 @@ function handle_poll_command(array $auth): void
             "SELECT id FROM alerts WHERE device_id = ? AND alert_type = 'command_expired' AND status = 'active' LIMIT 1",
             [$device_id]
         );
-        if (!$open) {
-            create_alert($device_id, 'command_expired', 'medium',
+        if (!$open && $expired_count > 0) {
+            create_alert($device_id, 'command_expired', 'warning',
                 'Dispensing request expired',
                 'A queued dispensing request expired before the device claimed it. Check the device connection and try again.');
         }
@@ -66,9 +64,12 @@ function handle_poll_command(array $auth): void
     // Claim the oldest pending command atomically (transaction + row lock)
     db()->beginTransaction();
     try {
+        // Use the same device-row lock order as the web request. A threshold
+        // passed at request time cannot authorize stale/unsafe later telemetry.
+        $device = db_fetch('SELECT * FROM devices WHERE id = ? FOR UPDATE', [$device_id]);
         $cmd = db_fetch(
             "SELECT * FROM device_commands
-              WHERE device_id = ? AND status = 'pending'
+              WHERE device_id = ? AND status = 'pending' AND expires_at > NOW()
               ORDER BY requested_at ASC
               LIMIT 1
               FOR UPDATE",
@@ -80,23 +81,37 @@ function handle_poll_command(array $auth): void
             api_success(['command' => null], 'No pending commands.');
         }
 
-        // Server-authoritative target
+        // The queued target is immutable; defaults/preferences may change later.
         $container_type = $cmd['container_type'];
-        $target_ml = (int)get_setting('container_' . $container_type . '_target_ml',
-            $container_type === 'tumbler' ? '500' : '250');
+        [$valid, $reason, $target_ml] = portal_authorized_command_target($cmd, $device_id, 'pending');
+        if ($valid) {
+            $reading = db_fetch('SELECT * FROM sensor_readings WHERE device_id = ? ORDER BY recorded_at DESC,id DESC LIMIT 1', [$device_id]);
+            $active = db_fetch("SELECT id FROM dispensing_sessions WHERE device_id = ? AND status = 'started' LIMIT 1", [$device_id]);
+            $claimed = db_fetch("SELECT id FROM device_commands WHERE device_id = ? AND status = 'claimed' LIMIT 1", [$device_id]);
+            $reason = portal_safety_reason($device, $reading, $active, $claimed,
+                portal_device_safety_alert($device_id), [], $target_ml);
+        }
+        if (!$valid || $reason !== null) {
+            db_update('device_commands', ['status' => 'rejected', 'completed_at' => date('Y-m-d H:i:s'), 'reject_reason' => $reason], 'id = ? AND status = ?', [$cmd['id'], 'pending']);
+            log_event($device_id, null, 'dispensing_command_rejected', 'warning',
+                'Queued request blocked by server safety checks: ' . $reason);
+            db()->commit();
+            api_success(['command' => null], 'Pending request was blocked by safety checks.');
+        }
 
         db_update('device_commands', [
             'status'     => 'claimed',
             'claimed_at' => date('Y-m-d H:i:s'),
         ], 'id = ?', [$cmd['id']]);
         db()->commit();
-    } catch (Exception $e) {
-        db()->rollBack();
+    } catch (Throwable $e) {
+        if (db()->inTransaction()) db()->rollBack();
         api_error('Failed to claim command.', 500);
     }
 
     log_event($device_id, null, 'dispensing_command_accepted', 'info',
-        "Command #{$cmd['id']} accepted by device (container: {$container_type}, target: {$target_ml}mL).");
+        "Command #{$cmd['id']} accepted by device (container: {$container_type}, target: {$target_ml}mL).",
+        ['command_id' => (int)$cmd['id'], 'container_type' => $container_type, 'target_amount_ml' => $target_ml, 'fill_amount_ml' => $target_ml, 'threshold_ml' => $target_ml, 'threshold_semantics' => 'fill_volume_ml']);
 
     api_success([
         'command' => [

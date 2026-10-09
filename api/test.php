@@ -68,6 +68,14 @@ function api_call(string $method, string $url, ?array $body = null, ?string $tok
     ];
 }
 
+/** Queue a custom fill only for this suite's newly created device. */
+function queue_test_fill(PDO $pdo, int $device_id, string $container, int $amount): int
+{
+    $stmt = $pdo->prepare("INSERT INTO device_commands (device_id, command_type, container_type, target_amount_ml, status, requested_at, expires_at) VALUES (?, 'dispense', ?, ?, 'pending', NOW(), DATE_ADD(NOW(), INTERVAL 30 SECOND))");
+    $stmt->execute([$device_id, $container, $amount]);
+    return (int)$pdo->lastInsertId();
+}
+
 // ── Setup ───────────────────────────────────────────────
 $base = 'http://localhost/WaterBonia/api';
 
@@ -158,8 +166,8 @@ test('status set to online', $dev_data['status'] === 'online');
 out('<h2>4. Sensor Reading</h2>');
 
 $r = api_call('POST', "{$base}/device/sensor-reading", [
-    'water_level_percent' => 75,
     'cup_detected' => false,
+    'container_detected' => false,
     'hand_detected' => false,
     'pump_status' => false,
     'battery_percent' => 90,
@@ -172,88 +180,91 @@ test('Reading has reading_id', isset($r['body']['data']['reading_id']));
 $sr = $pdo->prepare("SELECT * FROM sensor_readings WHERE device_id = ? ORDER BY id DESC LIMIT 1");
 $sr->execute([$test_device_id]);
 $sr_data = $sr->fetch();
-test('Water level stored correctly', $sr_data['water_level_percent'] === 75);
-test('Battery stored correctly', $sr_data['battery_percent'] === 90);
+test('Missing reservoir sensor stored as NULL', $sr_data['water_level_percent'] === null);
+test('Battery stored correctly', (int)$sr_data['battery_percent'] === 90);
 
 // ═══════════════════════════════════════════════════════
-// TEST 5: Invalid water level
+// TEST 5: Installed sensor validation
 // ═══════════════════════════════════════════════════════
 out('<h2>5. Validation</h2>');
 
 $r = api_call('POST', "{$base}/device/sensor-reading", [
-    'water_level_percent' => 150,
+    'battery_percent' => 150,
 ], $raw_token);
-test('Water level >100 returns 422', $r['status'] === 422, "got {$r['status']}");
+test('Battery >100 returns 422', $r['status'] === 422, "got {$r['status']}");
 test('Error includes details', isset($r['body']['details']));
 
 $r = api_call('POST', "{$base}/device/sensor-reading", [
-    'water_level_percent' => -5,
+    'pump_status' => 'invalid',
 ], $raw_token);
-test('Water level <0 returns 422', $r['status'] === 422, "got {$r['status']}");
+test('Malformed pump status returns 422', $r['status'] === 422, "got {$r['status']}");
 
 // ═══════════════════════════════════════════════════════
-// TEST 6: Low-water alert
+// TEST 6: Retired reservoir telemetry
 // ═══════════════════════════════════════════════════════
-out('<h2>6. Low-Water Alert</h2>');
+out('<h2>6. Retired Reservoir Telemetry</h2>');
 
-// Send reading below threshold (default threshold is 20%)
+// Legacy level values are ignored and must never generate a water alert.
 $r = api_call('POST', "{$base}/device/sensor-reading", [
     'water_level_percent' => 15,
+    'container_detected' => true,
+    'pump_status' => false,
 ], $raw_token);
-test('Low-water reading accepted', $r['status'] === 200);
+test('Legacy level input accepted and ignored', $r['status'] === 200);
 
-$alert = $pdo->prepare("SELECT * FROM alerts WHERE device_id = ? AND alert_type = 'low_water' AND status = 'active' LIMIT 1");
-$alert->execute([$test_device_id]);
-$alert_data = $alert->fetch();
-test('Low-water alert created', $alert_data !== false);
-test('Alert severity is warning', $alert_data['severity'] === 'warning' || $alert_data['severity'] === 'critical');
-
-// Send duplicate — should NOT create a second alert
 $r = api_call('POST', "{$base}/device/sensor-reading", [
-    'water_level_percent' => 12,
+    'water_level_percent' => 'retired-value',
+    'container_detected' => true,
+    'pump_status' => false,
 ], $raw_token);
+test('Malformed retired level input is ignored', $r['status'] === 200);
+$sr->execute([$test_device_id]);
+test('Retired level remains NULL in stored telemetry', $sr->fetch()['water_level_percent'] === null);
 $alert_count = $pdo->prepare("SELECT COUNT(*) as cnt FROM alerts WHERE device_id = ? AND alert_type = 'low_water' AND status = 'active'");
 $alert_count->execute([$test_device_id]);
 $count = $alert_count->fetch()['cnt'];
-test('No duplicate alert created', $count == 1, "got {$count} alerts");
-
-// Recovery — above threshold
-$r = api_call('POST', "{$base}/device/sensor-reading", [
-    'water_level_percent' => 50,
-], $raw_token);
-test('Recovery reading accepted', $r['status'] === 200);
-
-$alert_check = $pdo->prepare("SELECT status FROM alerts WHERE device_id = ? AND alert_type = 'low_water' AND id = ?");
-$alert_check->execute([$test_device_id, $alert_data['id']]);
-$resolved = $alert_check->fetch();
-test('Low-water alert auto-resolved', $resolved && $resolved['status'] === 'resolved');
+test('No reservoir alerts generated', (int)$count === 0, "got {$count} alerts");
 
 // ═══════════════════════════════════════════════════════
 // TEST 7: Dispensing session
 // ═══════════════════════════════════════════════════════
 out('<h2>7. Dispensing Session</h2>');
 
+$command_id = queue_test_fill($pdo, $test_device_id, 'cup', 137);
+$r = api_call('POST', "{$base}/device/poll-command", [], $raw_token);
+test('Queued custom Cup command is claimed', ($r['body']['data']['command']['command_id'] ?? null) === $command_id);
+test('Claim preserves custom 137 mL cutoff', ($r['body']['data']['command']['target_amount_ml'] ?? null) === 137);
+
 $r = api_call('POST', "{$base}/device/dispensing/start", [
+    'command_id' => $command_id, 'container_type' => 'cup', 'target_amount_ml' => 250,
+    'container_detected' => true,
+], $raw_token);
+test('Mismatched command target rejected (409)', $r['status'] === 409, "got {$r['status']}");
+
+$r = api_call('POST', "{$base}/device/dispensing/start", [
+    'command_id' => $command_id,
+    'container_type' => 'cup',
+    'target_amount_ml' => 137,
     'cup_detected' => true,
-    'hand_detected' => true,
-    'water_level_before' => 50,
+    'container_detected' => true,
 ], $raw_token);
 test('Dispensing start returns 201', $r['status'] === 201, "got {$r['status']}");
 $session_id = $r['body']['data']['session_id'] ?? null;
 test('Session ID returned', $session_id !== null);
 
-// Try to start another — should fail 409
+// The consumed command cannot start another session.
 $r = api_call('POST', "{$base}/device/dispensing/start", [
+    'command_id' => $command_id, 'container_type' => 'cup', 'target_amount_ml' => 137,
     'cup_detected' => true,
 ], $raw_token);
-test('Duplicate active session rejected (409)', $r['status'] === 409, "got {$r['status']}");
+test('Consumed command replay rejected (409)', $r['status'] === 409, "got {$r['status']}");
 
 // Complete the session
 sleep(1); // Wait for measurable duration
 $r = api_call('POST', "{$base}/device/dispensing/complete", [
     'session_id' => $session_id,
-    'water_level_after' => 45,
-    'stop_reason' => 'completed',
+    'measured_amount_ml' => 137,
+    'stop_reason' => 'target_reached',
 ], $raw_token);
 test('Dispensing complete returns 200', $r['status'] === 200, "got {$r['status']}");
 test('Duration calculated', ($r['body']['data']['duration_seconds'] ?? 0) >= 1);
@@ -264,6 +275,9 @@ $ds->execute([$session_id]);
 $ds_data = $ds->fetch();
 test('Session status is completed', $ds_data['status'] === 'completed');
 test('Session has ended_at', $ds_data['ended_at'] !== null);
+test('Session preserves selected fill amount', (int)$ds_data['target_amount_ml'] === 137);
+test('Measured fill stored', (int)$ds_data['measured_amount_ml'] === 137);
+test('Session has no reservoir readings', $ds_data['water_level_before'] === null && $ds_data['water_level_after'] === null);
 
 // ═══════════════════════════════════════════════════════
 // TEST 8: Session from another device
@@ -278,8 +292,21 @@ $other_raw = bin2hex(random_bytes(48));
 $stmt = $pdo->prepare("INSERT INTO device_tokens (device_id, token_hash, status) VALUES (?, ?, 'active')");
 $stmt->execute([$other_id, hash('sha256', $other_raw)]);
 
-// Start a session on the other device
-$r = api_call('POST', "{$base}/device/dispensing/start", [], $other_raw);
+// This second test device needs its own fresh telemetry and claimed fill.
+$r = api_call('POST', "{$base}/device/heartbeat", [], $other_raw);
+test('Other test device is online', $r['status'] === 200);
+$r = api_call('POST', "{$base}/device/sensor-reading", [
+    'container_detected' => true, 'pump_status' => false,
+], $other_raw);
+test('Other device telemetry needs no reservoir level', $r['status'] === 200);
+$other_command = queue_test_fill($pdo, $other_id, 'tumbler', 725);
+$r = api_call('POST', "{$base}/device/poll-command", [], $other_raw);
+test('Independent Tumbler command is claimed', ($r['body']['data']['command']['command_id'] ?? null) === $other_command);
+$r = api_call('POST', "{$base}/device/dispensing/start", [
+    'command_id' => $other_command, 'container_type' => 'tumbler', 'target_amount_ml' => 725,
+    'container_detected' => true,
+], $other_raw);
+test('Independent Tumbler session starts', $r['status'] === 201);
 $other_session = $r['body']['data']['session_id'] ?? null;
 
 // Try to complete it with our token — should fail 403
@@ -335,7 +362,7 @@ out('<h2>Cleanup</h2>');
 
 $pdo->prepare("DELETE FROM activity_logs WHERE device_id IN (?, ?)")->execute([$test_device_id, $other_id]);
 $pdo->prepare("DELETE FROM alerts WHERE device_id IN (?, ?)")->execute([$test_device_id, $other_id]);
-$pdo->prepare("DELETE FROM sensor_readings WHERE device_id = ?")->execute([$test_device_id]);
+$pdo->prepare("DELETE FROM sensor_readings WHERE device_id IN (?, ?)")->execute([$test_device_id, $other_id]);
 $pdo->prepare("DELETE FROM dispensing_sessions WHERE device_id IN (?, ?)")->execute([$test_device_id, $other_id]);
 $pdo->prepare("DELETE FROM device_commands WHERE device_id IN (?, ?)")->execute([$test_device_id, $other_id]);
 $pdo->prepare("DELETE FROM device_tokens WHERE device_id IN (?, ?)")->execute([$test_device_id, $other_id]);

@@ -1,13 +1,13 @@
 # WaterBonia: A Web- and Sensor-Based Automatic Water Dispensing System
 
-WaterBonia is an integrated Internet of Things (IoT) system that combines embedded hardware, a PHP REST API, and a web-based monitoring dashboard to control water dispensing safely and transparently.
+WaterBonia combines a public dispensing interface, a PHP REST API, MySQL, and ESP32 firmware. Users adjust the dispensing threshold for each container to match its size. The HX711 load cell measures dispensed water so the pump stops at the selected amount; there is no water-level sensor. Demo Mode explicitly simulates the workflow.
 
 The dispensing interaction follows a fixed four-step sequence:
 
-1. **Choose** — the user picks a container (cup or tumbler) on the web dashboard
-2. **Place** — the container-presence sensor confirms the container is on the tray
+1. **Choose** — pick Cup or Tumbler in the Execution Portal
+2. **Place** — adjust the dispensing amount in mL and detect the container on the tray
 3. **Dispense** — the user presses DISPENSE; the request is queued and the ESP32 runs the pump
-4. **Complete** — a load cell measures the dispensed water and the pump auto-stops at the target volume
+4. **Complete** — display the target, dispensed amount, and stopped pump; Demo Mode simulates the full sequence
 
 Hand detection (HC-SR04) is retained for diagnostics only — it is **not** a dispense trigger.
 
@@ -21,13 +21,13 @@ WaterBonia addresses key concepts in Advanced Human and Computer Interaction:
 
 - **Visible Interaction Sequence** — the dashboard makes the four-step flow (Choose → Place → Dispense → Complete) explicit with a persistent step rail
 - **Dashboard Usability** — Real-time sensor data presented through an intuitive monitoring interface
-- **Information Architecture** — Structured navigation across dashboard, device management, alerts, analytics, and system settings
+- **Information Architecture** — Sidebar views for dispensing, container settings, device feedback, activity, and safety guidance
 - **Feedback Systems** — Immediate visual feedback via RGB LED states, live dashboard polling, progress from measured volume, and alert notifications
 - **Error Prevention** — the DISPENSE button stays disabled until every precondition holds, and a multi-condition pump safety invariant prevents unsafe dispensing
-- **Status Visibility** — Device online/offline status, water level monitoring, container presence, and active alert counts always visible
-- **Single Source of Truth** — target volumes are read from system settings, never hard-coded in the UI
-- **Responsive Interface** — Mobile-friendly sidebar navigation and adaptive layouts
-- **User-Centered Monitoring** — Role-based access (admin/operator/viewer) with appropriate information density per role
+- **Status Visibility** — Device connection, container presence, pump status, and measured dispensing progress
+- **Validated Fill Amounts** — Each selected amount is checked by the server and saved as the immutable target of its command/session
+- **Responsive Interface** — Stacked controls and supporting cards, with activity entries adapted for small screens
+- **User-Centered Monitoring** — Recent meaningful events with date and time in Activity Logs
 
 See the `docs/` folder for full IT 114 HCI documentation.
 
@@ -35,13 +35,13 @@ See the `docs/` folder for full IT 114 HCI documentation.
 
 ## Key Features
 
-- **Container Selection** — cup (250 mL) or tumbler (500 mL), configured in system settings
+- **Container Selection** — Cup defaults to 250 mL and Tumbler to 500 mL; each amount is independently adjustable
 - **Container Presence Sensing** — confirms the container is placed before dispensing can be requested
 - **Measured Auto-Stop** — HX711 load cell measures dispensed water and stops the pump at the target
 - **Command Queue** — the web dashboard queues a request; the ESP32 polls, validates, and executes it
-- **Multi-Condition Safety** — pump runs only with container present, accepted request, sufficient water, valid load-cell samples, and no timeout/fault
-- **Real-Time Web Dashboard** — live container, water level, pump status, and dispense progress
-- **Alert System** — Automatic low-water and device-offline alerts with acknowledgement workflow
+- **Multi-Condition Safety** — pump runs only with container present, an authorized session, valid load-cell samples, and no timeout/fault
+- **Real-Time Web Dashboard** — live container, pump status, and measured dispense progress
+- **Alert System** — Device-offline alerts with acknowledgement workflow; water-level alerts are retired
 - **Device Management** — Register ESP32 devices, generate/revoke API tokens
 - **Activity Logging** — Comprehensive event logging for all system actions
 - **Analytics** — cup/tumbler session counts, measured-volume totals, and usage charts
@@ -55,7 +55,7 @@ See the `docs/` folder for full IT 114 HCI documentation.
 ```
         ┌─────────────────────────────────────────────┐
         │              ESP32 (device)                 │
-        │  container sensor · water level · HX711     │
+        │  container sensor · HX711                  │
         │  load cell · relay/pump · RGB LED           │
         └───────────────┬─────────────────────────────┘
                         │  Wi-Fi (Bearer token)
@@ -81,32 +81,22 @@ See the `docs/` folder for full IT 114 HCI documentation.
 
 ## Web Application
 
-The web dashboard provides a complete monitoring and management interface:
+Open `http://localhost/WaterBonia/` to reach `pages/dispense.php` without logging in. The Execution Portal retains the four-step flow, container cards, RGB feedback, progress, and completion layout. Its header and final copyright footer contain no administrative navigation. The retired `/admin/` entry also returns to dispensing; existing protected maintenance code, authentication, and database history are preserved.
 
-| Page | Purpose |
-|------|---------|
-| Dashboard | **Dispense flow** — Choose container → Place → Dispense → Complete, plus water level, pump, container and alert overview |
-| Water Level | Detailed water level monitoring with historical data |
-| Dispensing | Active session (target vs measured) and dispensing history |
-| Device Status | Connected device details and sensor readings |
-| Activity Logs | Searchable event log with type/level/date filtering |
-| Alerts | Alert management with acknowledge/resolve workflow |
-| Analytics | Cup/tumbler counts, measured volume, usage charts |
-| Devices | ESP32 device registration and token management |
-| Settings | System configuration (thresholds, container targets, timezone, display name) |
-| Help / About | Application information |
+Cup fills default to **250 mL** and Tumbler fills to **500 mL**. Users can independently choose a whole-number dispensing threshold, initially **1–2000 mL**, in Container Settings or the Place step. For example, a 150 mL Cup setting dispenses 150 mL rather than retaining the 250 mL default. The server validates selections, saves them as session preferences, and uses the selected amount as the command/session target. Changes apply to the next fill; an active operation keeps its accepted target.
 
-`pages/dispenser-status.php` is a JSON endpoint polled by the dashboard every 2 seconds for live state.
+The compact public sidebar opens dedicated views for Dispense Water, Container Settings, Device Status, Activity Logs, Safety Sequence, and Demo Controls while Demo Mode is enabled. Only the selected view is shown. Container Settings provides separate Cup and Tumbler inputs; Device Status shows connection, container detection, pump, and RGB feedback. One sidebar brand with **Water Dispensing System** as its subtitle replaces the repeated branding; the top toolbar shows the selected view and compact system/demo indicators. On smaller screens a collapsible section menu keeps every link available. Navigation supports deep links and browser history while preserving the current dispensing flow.
 
-### Default Login Credentials
+Activity Logs have their own sidebar view, with date and time displayed as `YYYY-MM-DD HH:mm:ss`. Demo history stays in browser storage, and every demo entry is marked simulated. Saved timestamps remain available after refresh; hardware timestamps retain the server's recorded date and time. Reset Demo preserves this history; Clear Demo History affects only that browser's demo history. Hardware activity comes from an allowlisted, device-scoped view of existing backend records.
 
-| Field | Value |
-|-------|-------|
-| Username | `admin_waterbonia` |
-| Password | See `database/README.md` |
-| Role | admin |
+Import `database/execution_portal_migration.sql` after the existing migrations to add configurable fill defaults/ranges using `INSERT IGNORE`. The migration creates no new tables and preserves existing values. Defaults also work in Demo Mode without MySQL. Hardware dispensing requires fresh telemetry, container presence, an online device, an available pump, and valid local load-cell measurements. The command claim and session start recheck authorization under a device lock. Tank-level readings and tank calibration are no longer required. Existing telemetry does not report physical RGB state, so hardware mode labels it unavailable.
 
-> The password is stored as a bcrypt hash. See database documentation for setup details.
+`pages/dispenser-status.php` provides CSRF-protected selection validation and live state. Hardware mode polls it every 2 seconds; Demo Mode does not poll hardware or send simulated data to device APIs.
+
+The ESP32 defers blocking network requests while its pump runs so local measurement and cutoff checks continue. Hardware progress readings pause during a fill; the final measured result and queued telemetry are sent after pump OFF. Demo Mode retains continuous simulated progress. A reading captured before session start is not presented as current pump state during that session.
+
+See [Execution Portal implementation and verification](docs/execution-portal-revision.md) for configuration, regression coverage, and remaining hardware dependencies.
+See [Layout optimization report](docs/execution-portal-layout-optimization.md) for the compact layout audit, changed files, checks, and viewport-verification limits.
 
 ---
 
@@ -114,7 +104,7 @@ The web dashboard provides a complete monitoring and management interface:
 
 The firmware runs on ESP32 DevKit boards and manages:
 
-- **Sensor reading** — container presence (IR/breakbeam), analog water level, HC-SR04 (diagnostic only)
+- **Sensor reading** — container presence (IR/breakbeam), HC-SR04 (diagnostic only)
 - **Load cell measurement** — HX711 reading converted to millilitres for auto-stop at target
 - **State machine** — INIT → WIFI_CONNECTING → READY → CONTAINER_DETECTED → WAITING_FOR_COMMAND → DISPENSING → COMPLETE
 - **Command polling** — claims dispense requests queued by the web dashboard
@@ -134,10 +124,9 @@ INIT → WIFI_CONNECTING → READY
                           ↓  (accepted dispense request + local checks pass)
                      DISPENSING
                     ↙          ↘
-        target reached      container removed / low water /
+        target reached      container removed /
                     ↓       timeout / load-cell fault
                  COMPLETE ──────────────────────► READY
-Any state → LOW_WATER → READY (when water recovers)
 Any state → ERROR     → READY (when sensors recovers)
 ```
 
@@ -147,7 +136,7 @@ The pump may be ON **only** when all of these hold:
 
 1. Container detected
 2. An accepted dispense request is active
-3. Water level > `LOCAL_PUMP_CUTOFF_PERCENT` (15%)
+3. Server session start succeeded for the claimed command and selected amount
 4. Load-cell samples are valid
 5. Dispense timeout (`MAX_DISPENSE_TIME_MS`, 30 s) not exceeded
 6. No emergency stop active
@@ -164,7 +153,6 @@ See `esp32/README.md` for full firmware documentation.
 |-----------|-------|------|---------|
 | Container Sensor | IR / breakbeam / limit switch | 27 | Container presence (not type classification) |
 | Load Cell | HX711 + load cell amplifier | 19 (DOUT), 18 (SCK) | Measured dispensed volume — **pins not yet finalized** |
-| Water Level | Analog sensor | 34 (ADC1) | Tank level monitoring |
 | Ultrasonic | HC-SR04 | 25 (TRIG), 26 (ECHO) | Diagnostics only — not a dispense trigger |
 | Pump Relay | 1-channel 5V | 32 | DC pump switching |
 | RGB LED | Common cathode/anode | 14 (R), 12 (G), 13 (B) | Status indication |
@@ -263,13 +251,14 @@ See `database/README.md` for schema details and import instructions.
    - Import `database/waterbonia.sql`
    - Import `database/api_migration.sql`
    - Import `database/dispensing_v2_migration.sql` (container type, target/measured volume, `device_commands` queue)
+   - Import `database/execution_portal_migration.sql` (configurable container fill defaults/ranges)
 
 4. **Access the application:**
    ```
    http://localhost/WaterBonia/
    ```
 
-5. **Login** with the default admin account (see `database/README.md`).
+5. **Use the Execution Portal** directly. With Demo Mode enabled, choose a container and use the simulation controls to present the full workflow. No login is required.
 
 ### ESP32 Firmware
 
@@ -381,7 +370,7 @@ WaterBonia/
 | Activity Logging | Complete |
 | Device Token Management | Complete |
 
-> **Note:** The ESP32 firmware compiles as software only and has **not** been tested on physical hardware. Target volumes recorded during bench simulation are not calibrated measurements. Use `TEST_MODE` in `config.h` for local testing without sensors; `ALLOW_DISPENSE_WITHOUT_LOAD_CELL` must remain `0` in production.
+> **Note:** The latest firmware revision has not been compiled or tested on physical hardware in this workspace. Target volumes recorded during bench simulation are not calibrated measurements. Use `TEST_MODE` in `config.h` for local testing without sensors; `ALLOW_DISPENSE_WITHOUT_LOAD_CELL` must remain `0` in production. The HX711 still needs physical calibration for accurate mL cutoff.
 
 ---
 

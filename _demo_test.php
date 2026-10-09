@@ -1,5 +1,6 @@
 <?php
 // TEMPORARY demo-flow harness — deleted right after the check.
+if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
 require_once __DIR__ . '/includes/functions.php';
 $_SESSION['user_id'] = 1;
 $_SESSION['user_role'] = 'admin';

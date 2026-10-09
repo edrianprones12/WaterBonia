@@ -1,11 +1,10 @@
         <footer class="portal-footer">
-            <span>WaterBonia — Smart Water Dispenser</span>
-            <span class="portal-footer-sep" aria-hidden="true">·</span>
-            <span>Dispensing is monitored from the <a href="<?= base_url('/admin/') ?>">Admin portal</a></span>
+            <span>&copy; <?= date('Y') ?> WaterBonia</span>
         </footer>
     </main>
 
 </div>
 <script src="<?= base_url('/assets/js/app.js') ?>"></script>
+<script src="<?= base_url('/assets/js/portal-navigation.js?v=' . filemtime(__DIR__ . '/../assets/js/portal-navigation.js')) ?>"></script>
 </body>
 </html>

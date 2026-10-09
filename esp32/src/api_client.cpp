@@ -155,14 +155,12 @@ bool api_send_heartbeat(const String &firmware_version,
 
 // ── Sensor Reading ───────────────────────────────────────
 
-bool api_send_sensor_reading(int water_level_percent,
-                             bool container_detected,
+bool api_send_sensor_reading(bool container_detected,
                              bool hand_detected,
                              bool pump_status,
                              int battery_percent,
                              int measured_ml) {
     String body = "{";
-    body += "\"water_level_percent\":" + String(water_level_percent) + ",";
     body += "\"container_detected\":" + String(container_detected ? "true" : "false") + ",";
     body += "\"cup_detected\":" + String(container_detected ? "true" : "false") + ",";
     body += "\"hand_detected\":" + String(hand_detected ? "true" : "false") + ",";
@@ -262,7 +260,6 @@ bool api_command_result(long command_id,
 // ── Dispensing Start ─────────────────────────────────────
 
 long api_dispensing_start(bool container_detected,
-                          int water_level_before,
                           const String &container_type,
                           long command_id,
                           int &target_ml) {
@@ -271,7 +268,6 @@ long api_dispensing_start(bool container_detected,
     body += "\"cup_detected\":" + String(container_detected ? "true" : "false") + ",";
     body += "\"container_type\":\"" + container_type + "\",";
     body += "\"target_amount_ml\":" + String(target_ml) + ",";
-    body += "\"water_level_before\":" + String(water_level_before) + ",";
     body += "\"command_id\":" + String(command_id);
     body += "}";
 
@@ -283,7 +279,7 @@ long api_dispensing_start(bool container_detected,
         if (session_id > 0) {
             Serial.printf("[API] Session started: #%ld\n", session_id);
 
-            // Adopt the server's authoritative target when provided.
+            // Confirm the authoritative selected target from session authorization.
             long server_target = parse_json_long(response, "target_amount_ml");
             if (server_target > 0 && server_target <= MAX_TARGET_ML) {
                 target_ml = (int)server_target;
@@ -294,18 +290,17 @@ long api_dispensing_start(bool container_detected,
     }
 
     if (code == 409) {
-        Serial.println("[API] Active session already exists (409).");
+        Serial.println("[API] Dispensing session request rejected (409).");
         return 0;
     }
 
     Serial.printf("[API] Dispensing start failed: %d\n", code);
-    return 0; // Return 0 — local dispensing continues regardless
+    return 0; // No production pump start without an accepted session.
 }
 
 // ── Dispensing Complete ──────────────────────────────────
 
 bool api_dispensing_complete(long session_id,
-                             int water_level_after,
                              const String &stop_reason,
                              int measured_ml) {
     if (session_id <= 0) {
@@ -316,7 +311,6 @@ bool api_dispensing_complete(long session_id,
 
     String body = "{";
     body += "\"session_id\":" + String(session_id) + ",";
-    body += "\"water_level_after\":" + String(water_level_after) + ",";
     body += "\"stop_reason\":\"" + stop_reason + "\",";
     body += "\"measured_amount_ml\":" + String(measured_ml) + ",";
     body += "\"amount_dispensed_ml\":" + String(measured_ml);
