@@ -9,6 +9,7 @@
 
 # ── ESP32 Secrets ──────────────────────────────
 esp32/secrets.h
+esp32/WaterBoniaTimer/config.local.h
 
 # ── PHP Config (local overrides) ───────────────
 config/local.php

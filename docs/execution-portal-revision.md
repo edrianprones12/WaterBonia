@@ -1,3 +1,5 @@
+> Historical design/test record. Superseded by [the real hardware integration](timer-hardware-integration.md); simulation is no longer available.
+
 # WaterBonia dispensing revision
 
 The public interface uses **Water Dispensing System** beneath the WATERBONIA brand. The sidebar opens one content view at a time: Dispense Water, Container Settings, Device Status, Activity Logs, Safety Sequence, and Demo Controls when Demo Mode is enabled. Navigation preserves an active fill, supports URL fragments and browser history, and provides a collapsible menu on small screens. See [Layout optimization report](execution-portal-layout-optimization.md) for layout details and visual-verification limits.

@@ -1,0 +1,6 @@
+Options -Indexes
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    # Keep repository internals, local build/journal artifacts and tests private.
+    RewriteRule ^(?:\.git|tmp|tests)(?:/|$) - [F,L,NC]
+</IfModule>

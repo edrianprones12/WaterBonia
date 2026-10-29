@@ -3,7 +3,7 @@
  * WaterBonia - Alerts Page
  */
 require_once __DIR__ . '/../includes/functions.php';
-require_login();
+require_valid_csrf();
 
 $page_title = 'Alerts';
 
@@ -11,7 +11,6 @@ $page_title = 'Alerts';
 if (is_post() && verify_csrf()) {
     $action = $_GET['action'] ?? '';
     $alert_id = (int)($_GET['id'] ?? 0);
-    $user = current_user();
 
     if ($alert_id > 0 && in_array($action, ['acknowledge', 'resolve'])) {
         $alert = db_fetch("SELECT * FROM alerts WHERE id = ?", [$alert_id]);
@@ -20,15 +19,15 @@ if (is_post() && verify_csrf()) {
                 db_update('alerts', [
                     'status'           => 'acknowledged',
                     'acknowledged_at'  => date('Y-m-d H:i:s'),
-                    'acknowledged_by'  => $user['id'],
+                    'acknowledged_by'  => null,
                 ], 'id = ?', [$alert_id]);
-                log_event($alert['device_id'], $user['id'], 'alert_acknowledged', 'info', 'Alert acknowledged: ' . $alert['title']);
+                log_event($alert['device_id'], null, 'alert_acknowledged', 'info', 'Alert acknowledged: ' . $alert['title']);
             } elseif ($action === 'resolve' && in_array($alert['status'], ['active', 'acknowledged'])) {
                 db_update('alerts', [
                     'status'     => 'resolved',
                     'resolved_at'=> date('Y-m-d H:i:s'),
                 ], 'id = ?', [$alert_id]);
-                log_event($alert['device_id'], $user['id'], 'alert_resolved', 'info', 'Alert resolved: ' . $alert['title']);
+                log_event($alert['device_id'], null, 'alert_resolved', 'info', 'Alert resolved: ' . $alert['title']);
             }
         }
         redirect('/pages/alerts.php');
@@ -184,16 +183,13 @@ include __DIR__ . '/../includes/header.php';
                             </td>
                             <td class="text-sm"><?= $a['resolved_at'] ? format_datetime($a['resolved_at']) : '—' ?></td>
                             <td>
-                                <?php if (can_edit()): ?>
+
                                     <?php if ($a['status'] === 'active'): ?>
                                         <?= alert_action_button($a['id'], 'acknowledge', 'Acknowledge') ?>
                                     <?php endif; ?>
                                     <?php if (in_array($a['status'], ['active', 'acknowledged'])): ?>
                                         <?= alert_action_button($a['id'], 'resolve', 'Resolve') ?>
                                     <?php endif; ?>
-                                <?php else: ?>
-                                    <span class="text-muted text-sm">—</span>
-                                <?php endif; ?>
                             </td>
                         </tr>
                         <?php endforeach; ?>

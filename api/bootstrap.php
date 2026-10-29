@@ -40,7 +40,9 @@ function api_success(mixed $data = null, string $message = '', int $code = 200):
     $response = ['success' => true];
     if ($message !== '') $response['message'] = $message;
     if ($data !== null) $response['data'] = $data;
-    echo json_encode($response, JSON_UNESCAPED_UNICODE);
+    $json = json_encode($response, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+    header('Content-Length: ' . strlen($json));
+    echo $json;
     exit;
 }
 
@@ -50,7 +52,9 @@ function api_error(string $error, int $code = 400, array $details = []): never
     header('Content-Type: application/json; charset=utf-8');
     $response = ['success' => false, 'error' => $error];
     if (!empty($details)) $response['details'] = $details;
-    echo json_encode($response, JSON_UNESCAPED_UNICODE);
+    $json = json_encode($response, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+    header('Content-Length: ' . strlen($json));
+    echo $json;
     exit;
 }
 

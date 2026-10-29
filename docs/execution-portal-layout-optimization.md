@@ -1,3 +1,5 @@
+> Historical design/test record. Superseded by [the real hardware integration](timer-hardware-integration.md); simulation is no longer available.
+
 # WaterBonia layout optimization
 
 The public interface uses **Water Dispensing System** beneath the WATERBONIA sidebar brand. Each sidebar link opens its own content view, retaining the compact styling and four-step dispensing workflow.

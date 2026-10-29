@@ -1,3 +1,7 @@
+# Current integration guide
+
+Read [Timer hardware integration](timer-hardware-integration.md) for current behavior, migration, setup, validation and rollback. Earlier layout reports are historical.
+
 # WaterBonia Documentation
 
 This folder contains project documentation, including IT 114 HCI materials.

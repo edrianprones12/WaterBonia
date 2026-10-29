@@ -4,9 +4,16 @@
  */
 
 session_start();
+// Browser sessions remain for CSRF, request idempotency and one-time device setup.
+// Old human-account state is ignored without destroying the kiosk session.
+unset($_SESSION['user_id'], $_SESSION['user_role'], $_SESSION['login_time']);
+set_exception_handler(function (Throwable $error): void {
+    http_response_code(503);
+    if (!headers_sent()) header('Content-Type: text/plain; charset=utf-8');
+    echo 'WaterBonia is temporarily unavailable. Please try again later.';
+});
 
 require_once __DIR__ . '/../config/database.php';
-require_once __DIR__ . '/../config/demo.php';
 require_once __DIR__ . '/../config/portal.php';
 
 /* ── Base URL ────────────────────────────────────────── */
@@ -64,56 +71,17 @@ function is_post(): bool
     return $_SERVER['REQUEST_METHOD'] === 'POST';
 }
 
-/* ── Authentication ───────────────────────────────────── */
+/* ── Session request protection ───────────────────────── */
 
-function logged_in(): bool
+/** Account-free form writes still require the browser's CSRF token. */
+function require_valid_csrf(): void
 {
-    return !empty($_SESSION['user_id']);
-}
-
-function require_login(): void
-{
-    if (!logged_in()) {
-        redirect('/auth/login.php');
+    if (is_post() && !verify_csrf()) {
+        http_response_code(403);
+        header('Content-Type: text/plain; charset=utf-8');
+        exit('Invalid CSRF token. Reload the page and try again.');
     }
 }
-
-function current_user(): ?array
-{
-    if (!logged_in()) {
-        return null;
-    }
-    static $user = null;
-    if ($user === null) {
-        $stmt = db()->prepare('SELECT id, username, email, full_name, role, status, last_login_at, created_at FROM users WHERE id = ?');
-        $stmt->execute([$_SESSION['user_id']]);
-        $user = $stmt->fetch();
-        if (!$user || $user['status'] !== 'active') {
-            session_destroy();
-            $user = null;
-            redirect('/auth/login.php');
-        }
-    }
-    return $user;
-}
-
-function current_role(): string
-{
-    $u = current_user();
-    return $u ? $u['role'] : '';
-}
-
-function is_admin(): bool
-{
-    return current_role() === 'admin';
-}
-
-function can_edit(): bool
-{
-    return in_array(current_role(), ['admin', 'operator'], true);
-}
-
-/* ── Database Helpers ─────────────────────────────────── */
 
 function db_fetch(string $sql, array $params = []): ?array
 {
@@ -282,7 +250,8 @@ function water_level_class(?int $percent): string
 
 function get_active_device(): ?array
 {
-    return db_fetch("SELECT * FROM devices WHERE status != 'disabled' ORDER BY last_seen_at DESC LIMIT 1");
+    $id = portal_integer(get_setting('portal_device_id', '0'));
+    return $id ? db_fetch('SELECT * FROM devices WHERE id = ?', [$id]) : null;
 }
 
 function get_all_devices(): array
@@ -292,22 +261,8 @@ function get_all_devices(): array
 
 function get_setting(string $key, string $default = ''): string
 {
-    static $demo_db_unavailable = false;
-    if ($demo_db_unavailable && WATERBONIA_DEMO_MODE) return $default;
-    try {
-        $row = db_fetch("SELECT setting_value FROM system_settings WHERE setting_key = ?", [$key]);
-        return $row ? $row['setting_value'] : $default;
-    } catch (PDOException $e) {
-        // Presentation defaults are allowed without MySQL. Real operation fails closed.
-        if (WATERBONIA_DEMO_MODE) {
-            $demo_db_unavailable = true;
-            return $default;
-        }
-        throw $e;
-    }
+    return db_fetch('SELECT setting_value FROM system_settings WHERE setting_key = ?', [$key])['setting_value'] ?? $default;
 }
-
-/* ── Container / Dispensing v2 Helpers ─────────────────── */
 
 const CONTAINER_TYPES = ['cup', 'tumbler'];
 
@@ -325,85 +280,45 @@ function container_label(string $container_type): string
  * Create a pending dispense command for a device.
  * Returns [ok, message] — command is queued for ESP32 polling.
  */
-function request_dispense(int $device_id, string $container_type, ?int $user_id = null, mixed $threshold_ml = null): array
+function request_dispense(int $device_id, string $container_type, ?int $user_id = null, mixed $threshold_ml = null, ?string $request_id = null): array
 {
-    if (WATERBONIA_DEMO_MODE) return [false, 'Demo dispensing runs only in the simulated presentation.', null];
-    if (!in_array($container_type, CONTAINER_TYPES, true)) {
-        return [false, 'Invalid container type.', null];
-    }
-
-    $threshold_ml ??= portal_selected_thresholds()[$container_type];
-    [$valid, $validation_message, $threshold] = validate_water_threshold($container_type, $threshold_ml);
-    if (!$valid) return [false, $validation_message, null];
-
-    $err = null;
-    $message = null;
-    $command_id = null;
-
-    // The device row lock serialises concurrent requests for the same device,
-    // so two simultaneous clicks can never queue two commands.
-    db()->beginTransaction();
+    // There are no human accounts. Keep historical FK columns nullable.
+    // Ignore any legacy/caller-supplied identity; new operations are account-free.
+    $user_id = null;
+    $bound = portal_integer(get_setting('portal_device_id', '0'));
+    if (!$bound || $device_id !== $bound) return [false, 'A dispenser must be assigned in Settings.', null];
+    $duration = timer_duration_ms($container_type);
+    if ($duration === null) return [false, 'This container needs a calibrated duration in Settings (1–30 seconds).', null];
+    if (!is_string($request_id) || !preg_match('/^[a-zA-Z0-9_-]{16,64}$/D', $request_id)) return [false, 'A unique request identifier is required.', null];
+    // Keep retries scoped to this browser even for NULL guest user IDs.
+    // The device-row lock below serializes lookups/inserts, including guests.
+    $_SESSION['portal_request_namespace'] ??= bin2hex(random_bytes(16));
+    $request_id = hash('sha256', $_SESSION['portal_request_namespace'] . ':' . $request_id);
     try {
-        $device = db_fetch("SELECT * FROM devices WHERE id = ? FOR UPDATE", [$device_id]);
-        $active = db_fetch(
-                "SELECT id FROM dispensing_sessions WHERE device_id = ? AND status = 'started' LIMIT 1",
-                [$device_id]
-            );
-        $queued = db_fetch(
-                "SELECT id FROM device_commands
-                  WHERE device_id = ? AND status IN ('pending','claimed')
-                    AND (status = 'claimed' OR expires_at > NOW())
-                  LIMIT 1",
-                [$device_id]
-            );
-        $latest = db_fetch(
-                "SELECT * FROM sensor_readings WHERE device_id = ? ORDER BY recorded_at DESC,id DESC LIMIT 1",
-                [$device_id]
-            );
-        $err = portal_safety_reason($device, $latest, $active, $queued,
-            portal_device_safety_alert($device_id), [], $threshold);
-
-        if ($err === null) {
-            $ttl = max(1, min(120, portal_integer(get_setting('dispense_command_ttl_sec', '30')) ?? 30));
-            $target = $threshold;
-
-            $command_id = db_insert('device_commands', [
-                'device_id'        => $device_id,
-                'user_id'          => $user_id,
-                'command_type'     => 'dispense',
-                'container_type'   => $container_type,
-                'target_amount_ml' => $target,
-                'status'           => 'pending',
-                'requested_at'     => date('Y-m-d H:i:s'),
-                'expires_at'       => date('Y-m-d H:i:s', time() + $ttl),
-            ]);
-
-            log_event($device_id, $user_id, 'dispensing_command_created', 'info',
-                "Dispensing command #{$command_id} created: {$container_type} ({$target}mL), expires in {$ttl}s.",
-                ['command_id' => $command_id, 'container_type' => $container_type, 'target_amount_ml' => $target, 'fill_amount_ml' => $target, 'threshold_ml' => $target, 'threshold_semantics' => 'fill_volume_ml']);
-
-            $message = "Dispensing requested — {$container_type} ({$target}mL).";
-            db()->commit();
-        } else {
-            db()->rollBack();
+        db()->beginTransaction();
+        $device = db_fetch('SELECT * FROM devices WHERE id = ? FOR UPDATE', [$device_id]);
+        $expired = db()->prepare("UPDATE device_commands SET status='expired',completed_at=NOW(),reject_reason='command_expired' WHERE device_id=? AND status IN ('pending','claimed') AND session_id IS NULL AND expires_at<=NOW()");
+        $expired->execute([$device_id]);
+        if ($expired->rowCount()) log_event($device_id,null,'command_expired','warning','Unstarted timed request expired.');
+        $existing = db_fetch('SELECT * FROM device_commands WHERE device_id = ? AND request_id = ?', [$device_id,$request_id]);
+        if ($existing) {
+            if ($existing['container_type'] !== $container_type) { db()->rollBack(); return [false, 'Request identifier was already used for another container.', null]; }
+            db()->commit(); $_SESSION['portal_command_id'] = (int)$existing['id'];
+            return [true, 'Existing request: '.$existing['status'], (int)$existing['id']];
         }
-    } catch (Throwable $e) {
-        if (db()->inTransaction()) {
-            db()->rollBack();
-        }
-        return [false, 'Could not queue the dispensing request.', null];
-    }
-
-    if ($err !== null) {
-        // One event for an explicit failed request; polling never records requests.
-        log_event($device ? $device_id : null, $user_id,
-            'dispensing_blocked', 'warning', $err,
-            ['container_type' => $container_type, 'target_amount_ml' => $threshold, 'fill_amount_ml' => $threshold, 'threshold_semantics' => 'fill_volume_ml']);
-        return [false, $err, null];
-    }
-
-    $_SESSION['portal_command_id'] = $command_id;
-    return [true, $message, $command_id];
+        $active = db_fetch("SELECT id FROM dispensing_sessions WHERE device_id = ? AND status = 'started' LIMIT 1", [$device_id]);
+        $queued = db_fetch("SELECT id FROM device_commands WHERE device_id = ? AND status IN ('pending','claimed','running') AND (status <> 'pending' OR expires_at > NOW()) LIMIT 1", [$device_id]);
+        $reading = db_fetch('SELECT * FROM sensor_readings WHERE device_id = ? ORDER BY recorded_at DESC,id DESC LIMIT 1', [$device_id]);
+        $reason = portal_safety_reason($device,$reading,$active,$queued,portal_device_safety_alert($device_id),[]);
+        if ($reason !== null) { db()->rollBack(); return [false,$reason,null]; }
+        $id = db_insert('device_commands', ['device_id'=>$device_id,'user_id'=>$user_id,'request_id'=>$request_id,
+            'command_type'=>'dispense','container_type'=>$container_type,'target_amount_ml'=>portal_container_target_ml($container_type),
+            'duration_ms'=>$duration,'status'=>'pending','requested_at'=>date('Y-m-d H:i:s'),'expires_at'=>date('Y-m-d H:i:s',time()+30)]);
+        log_event($device_id,$user_id,'dispensing_command_created','info','Timed dispensing requested; nominal volume is not measured.',
+            ['command_id'=>$id,'container_type'=>$container_type,'duration_ms'=>$duration,'nominal_target_ml'=>portal_container_target_ml($container_type),'mode'=>'hardware','request_source'=>'public_portal']);
+        db()->commit(); $_SESSION['portal_command_id']=$id;
+        return [true,'Dispensing request pending device confirmation.',$id];
+    } catch (Throwable $e) { if(db()->inTransaction()) db()->rollBack(); return [false,'Could not queue the dispensing request.',null]; }
 }
 
 /**
@@ -418,8 +333,8 @@ function refresh_device_offline_state(?array $device): void
         return;
     }
 
-    $timeout = (int)get_setting('device_offline_timeout_seconds', '120');
-    if ($device['last_seen_at'] && (time() - strtotime($device['last_seen_at'])) <= $timeout) {
+    $timeout = 30;
+    if (portal_fresh_timestamp($device['last_heartbeat_at'] ?? null, $timeout)) {
         return;
     }
 
@@ -454,8 +369,8 @@ function refresh_device_offline_state(?array $device): void
 function get_live_dispenser_state(?array $device): array
 {
     $state = [
-        'container_detected' => false,
-        'pump_status'        => false,
+        'container_detected' => null,
+        'pump_status'        => null,
         'active_session'     => null,
         'pending_command'    => null,
         'device_online'      => false,
@@ -473,7 +388,7 @@ function get_live_dispenser_state(?array $device): array
     refresh_device_offline_state($device);
 
     $state['device_online'] = $device['status'] === 'online'
-        && portal_fresh_timestamp($device['last_seen_at'] ?? null, max(1, portal_integer(get_setting('device_offline_timeout_seconds', '120')) ?? 120));
+        && portal_fresh_timestamp($device['last_heartbeat_at'] ?? null, 30);
 
     $reading = db_fetch(
         "SELECT * FROM sensor_readings WHERE device_id = ? ORDER BY recorded_at DESC,id DESC LIMIT 1",
@@ -483,11 +398,13 @@ function get_live_dispenser_state(?array $device): array
     $state['telemetry_fresh'] = $state['device_online'] && $reading !== null
         && portal_fresh_timestamp($reading['recorded_at'] ?? null, portal_telemetry_timeout());
     $safety_alert = portal_device_safety_alert((int)$device['id']);
-    $state['telemetry_valid'] = $state['telemetry_fresh'] && !$safety_alert
+    // An outstanding operation alert blocks dispensing, but does not erase a
+    // fresh, healthy physical sensor report. Readiness is checked separately.
+    $state['telemetry_valid'] = $state['telemetry_fresh'] && timer_sensor_valid($reading, $device)
         && array_key_exists('pump_status', $reading)
         && in_array($reading['pump_status'], [0, 1, '0', '1', false, true], true);
     if ($reading && $state['telemetry_valid']) {
-        $state['container_detected'] = !empty($reading['container_detected']) || !empty($reading['cup_detected']);
+        $state['container_detected'] = !empty($reading['container_detected']);
         $state['pump_status']    = !empty($reading['pump_status']);
     }
 
@@ -497,7 +414,7 @@ function get_live_dispenser_state(?array $device): array
     );
     $state['pending_command'] = db_fetch(
         "SELECT * FROM device_commands
-          WHERE device_id = ? AND status IN ('pending','claimed') AND (status = 'claimed' OR expires_at > NOW())
+          WHERE device_id = ? AND status IN ('pending','claimed','running') AND (status <> 'pending' OR expires_at > NOW())
           ORDER BY requested_at DESC LIMIT 1",
         [$device['id']]
     );

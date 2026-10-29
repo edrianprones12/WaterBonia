@@ -3,7 +3,6 @@
  * WaterBonia - Water Level Page
  */
 require_once __DIR__ . '/../includes/functions.php';
-require_login();
 
 $page_title = 'Water Level';
 $device = get_active_device();

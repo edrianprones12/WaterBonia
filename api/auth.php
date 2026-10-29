@@ -71,6 +71,7 @@ function authenticate_device(): array
 
 function validate_device_identity(array $auth, array $body): void
 {
+    if (isset($body['device_id']) && portal_integer($body['device_id']) !== $auth['device_id']) api_error('Device identity mismatch.',403);
     // If the body contains device identifiers, verify they match the authenticated device
     if (isset($body['device_code']) && $body['device_code'] !== $auth['device_code']) {
         api_error('Device code does not match authenticated device.', 403);

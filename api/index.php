@@ -7,6 +7,10 @@
  */
 
 header('Content-Type: application/json; charset=utf-8');
+header('Cache-Control: no-store');
+set_exception_handler(function (Throwable $error): void {
+    http_response_code(503); echo json_encode(['success'=>false,'error'=>'Device service unavailable.']);
+});
 
 // Handle CORS for future use
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
@@ -51,10 +55,11 @@ $action   = $segments[1] ?? '';
 
 // ── Public endpoints (no auth required) ─────────────────
 if ($resource === 'status' && $action === '') {
+    if ($_SERVER['REQUEST_METHOD'] !== 'GET') api_error('Method not allowed.',405);
     api_success([
         'system'    => 'WaterBonia',
-        'version'   => '0.2.0-dev',
-        'api_version' => '1.0.0',
+        'version'   => 'timer-2.0',
+        'api_version' => '2.0.0',
         'timestamp' => date('c'),
         'endpoints' => [
             'status'            => 'GET  /api/status',

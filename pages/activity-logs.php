@@ -3,7 +3,6 @@
  * WaterBonia - Activity Logs Page
  */
 require_once __DIR__ . '/../includes/functions.php';
-require_login();
 
 $page_title = 'Activity Logs';
 
@@ -122,7 +121,7 @@ include __DIR__ . '/../includes/header.php';
                         <tr>
                             <th>Date/Time</th>
                             <th>Device</th>
-                            <th>User</th>
+                            <th>Recorded by</th>
                             <th>Event Type</th>
                             <th>Level</th>
                             <th>Message</th>

@@ -3,15 +3,9 @@
  * WaterBonia - Settings Page
  */
 require_once __DIR__ . '/../includes/functions.php';
-require_login();
+require_valid_csrf();
 
 $page_title = 'Settings';
-
-if (!can_edit()) {
-    echo '<div class="alert alert-danger">You do not have permission to modify settings.</div>';
-    include __DIR__ . '/../includes/footer.php';
-    exit;
-}
 
 $success = '';
 $error = '';
@@ -20,9 +14,11 @@ if (is_post() && verify_csrf()) {
     $setting_key = $_POST['setting_key'] ?? '';
     $setting_value = $_POST['setting_value'] ?? '';
 
-    $valid_keys = ['system_name','timezone','low_water_threshold','dispensing_timeout_seconds','device_offline_timeout_seconds','default_water_capacity_ml','container_cup_target_ml','container_tumbler_target_ml','dispense_command_ttl_sec'];
+    $valid_keys = ['portal_device_id','container_cup_duration_seconds','container_tumbler_duration_seconds','system_name','timezone','low_water_threshold','dispensing_timeout_seconds','device_offline_timeout_seconds','default_water_capacity_ml','container_cup_target_ml','container_tumbler_target_ml','dispense_command_ttl_sec'];
 
-    if (!in_array($setting_key, $valid_keys)) {
+    if (in_array($setting_key, ['portal_device_id','container_cup_duration_seconds','container_tumbler_duration_seconds'], true) && (portal_integer($setting_value) === null || ($setting_key !== 'portal_device_id' && (int)$setting_value > 30))) {
+        $error = 'Duration must be a whole number from 0 to 30 seconds; 0 disables dispensing.';
+    } elseif (!in_array($setting_key, $valid_keys)) {
         $error = 'Invalid setting.';
     } elseif ($setting_value === '') {
         $error = 'Setting value cannot be empty.';
@@ -44,9 +40,8 @@ if (is_post() && verify_csrf()) {
         }
         if ($error === '') {
             $old_value = get_setting($setting_key);
-            db_update('system_settings', ['setting_value' => $setting_value], 'setting_key = ?', [$setting_key]);
-            $user = current_user();
-            log_event(null, $user['id'], 'configuration_changed', 'info', "Setting changed: {$setting_key} from '{$old_value}' to '{$setting_value}'");
+            db_update('system_settings', ['setting_value' => $setting_value, 'updated_by' => null], 'setting_key = ?', [$setting_key]);
+            log_event(null, null, 'configuration_changed', 'info', "Setting changed: {$setting_key} from '{$old_value}' to '{$setting_value}'");
             $success = 'Setting updated successfully.';
         }
     }

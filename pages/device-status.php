@@ -3,7 +3,6 @@
  * WaterBonia - Device Status Page
  */
 require_once __DIR__ . '/../includes/functions.php';
-require_login();
 
 $page_title = 'Device Status';
 $device = get_active_device();

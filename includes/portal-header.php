@@ -6,7 +6,7 @@
  *
  * LAYOUT: One sidebar brand and compact page/status toolbar.
  *   LEFT:  Current section title
- *   RIGHT: system status + DEMO MODE pill when simulation is enabled
+ *   RIGHT: actual device status
  */
 $page_title = $page_title ?? 'Water Dispensing System';
 $availability = $availability ?? null;
@@ -17,7 +17,6 @@ $portal_navigation_items = [
     ['label' => 'Activity Logs', 'anchor' => 'activity-logs', 'icon' => 'M8 3H5v18h14V3h-3 M8 2h8v4H8V2Z M8 10h8 M8 14h8 M8 18h5'],
     ['label' => 'Safety Sequence', 'anchor' => 'safety-sequence', 'icon' => 'M12 2 3 6v6c0 5 9 10 9 10s9-5 9-10V6l-9-4Z M8 12l3 3 5-6'],
 ];
-if (WATERBONIA_DEMO_MODE) $portal_navigation_items[] = ['label' => 'Demo Controls', 'anchor' => 'demo-card', 'icon' => 'M4 7h16 M4 17h16 M8 4v6 M16 14v6'];
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -46,6 +45,7 @@ if (WATERBONIA_DEMO_MODE) $portal_navigation_items[] = ['label' => 'Demo Control
     <header class="portal-header">
         <p class="portal-page-heading" id="portal-page-heading">Dispense Water</p>
         <div class="portal-actions">
+            <a class="btn btn-outline" href="<?= base_url('/pages/dashboard.php') ?>">Dashboard</a>
             <?php if (!empty($availability)): ?>
             <span class="status-pill is-<?= sanitize($availability['tone']) ?>"
                   id="status-pill" title="<?= sanitize($availability['hint']) ?>">
@@ -53,12 +53,7 @@ if (WATERBONIA_DEMO_MODE) $portal_navigation_items[] = ['label' => 'Demo Control
                 <span id="status-pill-label"><?= sanitize($availability['label']) ?></span>
             </span>
             <?php endif; ?>
-            <?php if (WATERBONIA_DEMO_MODE): ?>
-            <span class="status-pill is-demo" id="demo-pill" title="Simulation — No physical hardware connected">
-                <span class="pill-dot"></span>
-                <span>DEMO MODE</span>
-            </span>
-            <?php endif; ?>
+
         </div>
     </header>
 

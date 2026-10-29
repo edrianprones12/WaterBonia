@@ -3,7 +3,6 @@
  * WaterBonia - Dispensing Page
  */
 require_once __DIR__ . '/../includes/functions.php';
-require_login();
 
 $page_title = 'Dispensing';
 $device = get_active_device();
@@ -63,7 +62,7 @@ include __DIR__ . '/../includes/header.php';
     <div class="stat-card">
         <div class="stat-icon blue">⚖</div>
         <div class="stat-content">
-            <div class="stat-label">Measured (live)</div>
+            <div class="stat-label">Measured volume (not fitted)</div>
             <div class="stat-value" style="font-size:1.1rem">
                 <?= $active_session && ($active_session['measured_amount_ml'] ?? null) !== null
                     ? (int)$active_session['measured_amount_ml'] . ' mL'
@@ -102,11 +101,11 @@ include __DIR__ . '/../includes/header.php';
     <div class="card-body">
         <table style="width:100%">
             <tr><td class="text-muted" style="width:35%">Session ID</td><td>#<?= $active_session['id'] ?></td></tr>
-            <tr><td class="text-muted">Started At</td><td><?= format_datetime($active_session['started_at']) ?></td></tr>
+            <tr><td class="text-muted">Backend authorization time</td><td><?= format_datetime($active_session['started_at']) ?></td></tr>
             <tr><td class="text-muted">Container Type</td><td><?= ($active_session['container_type'] ?? null) ? sanitize(ucfirst($active_session['container_type'])) : '—' ?></td></tr>
             <tr><td class="text-muted">Container Detected</td><td><?= !empty($active_session['container_detected']) || !empty($active_session['cup_detected']) ? 'Yes' : 'No' ?></td></tr>
             <tr><td class="text-muted">Target</td><td><?= ($active_session['target_amount_ml'] ?? null) !== null ? (int)$active_session['target_amount_ml'] . ' mL' : '—' ?></td></tr>
-            <tr><td class="text-muted">Measured (load cell)</td><td><?= ($active_session['measured_amount_ml'] ?? null) !== null ? (int)$active_session['measured_amount_ml'] . ' mL' : '0 mL' ?></td></tr>
+            <tr><td class="text-muted">Historical measured volume</td><td><?= ($active_session['measured_amount_ml'] ?? null) !== null ? (int)$active_session['measured_amount_ml'] . ' mL' : 'Not measured' ?></td></tr>
             <tr><td class="text-muted">Water Level Before</td><td><?= $active_session['water_level_before'] !== null ? $active_session['water_level_before'] . '%' : '—' ?></td></tr>
         </table>
     </div>
@@ -130,8 +129,8 @@ include __DIR__ . '/../includes/header.php';
                             <th>ID</th>
                             <th>Started</th>
                             <th>Container</th>
-                            <th>Target</th>
-                            <th>Measured</th>
+                            <th>Nominal target</th>
+                            <th>Historical measured volume</th>
                             <th>Duration</th>
                             <th>Stop Reason</th>
                             <th>Status</th>

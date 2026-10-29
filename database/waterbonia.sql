@@ -171,16 +171,8 @@ SET FOREIGN_KEY_CHECKS = 1;
 -- SAMPLE DATA (development only)
 -- ============================================================
 
--- Administrator (password: Waterbonia@123)
-INSERT INTO `users` (`username`, `email`, `password_hash`, `full_name`, `role`, `status`)
-VALUES (
-  'admin_waterbonia',
-  'admin@waterbonia.local',
-  '$2y$10$b3BMeGKVSBUBsXEIxvQR9urNnUpgHERmp.cjWznSmUTB2jsxgd4L.',
-  'System Administrator',
-  'admin',
-  'active'
-);
+-- Human accounts are retired; no login account is seeded.
+-- The users table remains solely for compatibility with historical foreign keys.
 
 -- Sample device
 INSERT INTO `devices` (`device_code`, `device_name`, `location`, `esp32_identifier`, `status`, `firmware_version`)

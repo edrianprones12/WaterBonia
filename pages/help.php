@@ -3,7 +3,6 @@
  * WaterBonia - Help / About Page
  */
 require_once __DIR__ . '/../includes/functions.php';
-require_login();
 
 $page_title = 'Help / About';
 

@@ -1,3 +1,7 @@
+# Timer integration update
+
+For an existing database, verify the installed schema before applying `timer_integration_migration.sql` **once**, after the original API, v2 dispensing, and execution-portal migrations. Export the live database first. Do not import `waterbonia.sql` over existing records. New presets are disabled at zero, and `portal_device_id` is unassigned at zero. See [the setup and rollback guide](../docs/timer-hardware-integration.md). The live schema was verified outside the restricted test environment, backed up, and migrated after the disposable migration/API checks passed. Do not reapply it on this installation.
+
 # WaterBonia Database
 
 MySQL database for the WaterBonia IoT smart water dispenser system.

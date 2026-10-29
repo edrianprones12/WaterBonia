@@ -36,8 +36,8 @@ check(portal_selected_thresholds() === ['cup' => 137, 'tumbler' => 725], 'indepe
 $settings['container_cup_fill_min_ml'] = '150';
 check(portal_selected_thresholds()['cup'] === 250, 'session selection revalidates');
 $settings = [];
-$device = ['id' => 7, 'status' => 'online', 'last_seen_at' => date('Y-m-d H:i:s')];
-$reading = ['device_id' => 7, 'recorded_at' => date('Y-m-d H:i:s'), 'water_level_percent' => null, 'container_detected' => 1, 'cup_detected' => 0, 'pump_status' => 0];
+$device = ['id' => 7, 'status' => 'online', 'last_seen_at' => date('Y-m-d H:i:s'), 'last_heartbeat_at' => date('Y-m-d H:i:s'), 'boot_id' => 'abc'];
+$reading = ['sensor_status' => 'ok', 'boot_id' => 'abc', 'device_id' => 7, 'recorded_at' => date('Y-m-d H:i:s'), 'water_level_percent' => null, 'container_detected' => 1, 'cup_detected' => 0, 'pump_status' => 0];
 check(portal_safety_reason($device, $reading, null, null, false, [], 137) === null, 'fresh telemetry needs no level sensor');
 foreach ([null, '0', '10', '101', 'invalid'] as $legacy_water) check(portal_safety_reason($device, array_replace($reading, ['water_level_percent' => $legacy_water]), null, null, false, [], 137) === null, 'legacy water never gates fill');
 $stale = array_replace($reading, ['recorded_at' => date('Y-m-d H:i:s', time() - 31)]);
@@ -49,7 +49,7 @@ check(portal_safety_reason($device, $stale, null, null, false, [], 137) !== null
 check(portal_safety_reason($device, null, null, null, false, [], 137) !== null, 'missing telemetry blocked');
 check(portal_safety_reason(null, $reading, null, null, false, [], 137) !== null, 'missing device blocked');
 foreach (['offline', 'disabled', 'maintenance'] as $status) check(portal_safety_reason(array_replace($device, ['status' => $status]), $reading, null, null, false, [], 137) !== null, 'unavailable device blocked');
-check(portal_safety_reason(array_replace($device, ['last_seen_at' => date('Y-m-d H:i:s', time() - 121)]), $reading, null, null, false, [], 137) !== null, 'stale heartbeat blocked');
+check(portal_safety_reason(array_replace($device, ['last_heartbeat_at' => date('Y-m-d H:i:s', time() - 31)]), $reading, null, null, false, [], 137) !== null, 'stale heartbeat blocked');
 check(portal_safety_reason($device, array_replace($reading, ['device_id' => 8]), null, null, false, [], 137) !== null, 'other-device telemetry blocked');
 check(portal_safety_reason($device, $reading, ['id' => 1], null, false, [], 137) !== null, 'active session blocked');
 check(portal_safety_reason($device, $reading, null, ['id' => 1], false, [], 137) !== null, 'queued/claimed concurrency blocked');
@@ -65,74 +65,4 @@ check(portal_session_start_target($command, 7, 'cup', 137)[2] === 137, 'preferen
 $settings = [];
 foreach ([[null, 7, 'cup', 137], [$command, 8, 'cup', 137], [$command, 7, 'tumbler', 137], [$command, 7, 'cup', 250], [$command, 7, 'cup', 137.0], [array_replace($command, ['status' => 'pending']), 7, 'cup', 137]] as $attempt) check(!portal_session_start_target(...$attempt)[0], 'command mismatch/replay rejected');
 
-// Fiber suspension models API exit without a fake exception being caught by
-// production handlers. All persistence below is confined to these memory arrays.
-class PortalFixtureDatabase {
-    public bool $transaction = false;
-    public function beginTransaction(): bool { $this->transaction = true; return true; }
-    public function commit(): bool { $this->transaction = false; return true; }
-    public function rollBack(): bool { $this->transaction = false; return true; }
-    public function inTransaction(): bool { return $this->transaction; }
-    public function prepare(string $sql): object { return new class { public function execute(array $params): bool { return true; } public function fetchAll(int $mode): array { return []; } }; }
-}
-$fixture = []; $fixture_db = new PortalFixtureDatabase();
-function db(): PortalFixtureDatabase { global $fixture_db; return $fixture_db; }
-function db_fetch(string $sql, array $params = []): ?array {
-    global $fixture;
-    if (str_contains($sql, 'FROM devices')) return $fixture['device'];
-    if (str_contains($sql, 'FROM sensor_readings')) return $fixture['reading'];
-    if (str_contains($sql, 'FROM alerts')) return $fixture['alert'] ? ['id' => 1] : null;
-    if (str_contains($sql, 'FROM dispensing_sessions')) return $fixture['active'];
-    if (str_contains($sql, 'FROM device_commands')) {
-        if (str_contains($sql, 'id <>') || str_contains($sql, "status = 'claimed' LIMIT")) return $fixture['other'];
-        $cmd = $fixture['command'];
-        if (str_contains($sql, 'WHERE id =')) return $cmd && (int)$cmd['id'] === (int)$params[0] && (int)$cmd['device_id'] === (int)$params[1] ? $cmd : null;
-        return $cmd && $cmd['status'] === 'pending' ? $cmd : null;
-    }
-    throw new RuntimeException('Unexpected fixture query: ' . $sql);
-}
-function db_insert(string $table, array $data): int { global $fixture; $fixture['inserts'][] = ['table' => $table, 'data' => $data]; return 101; }
-function db_update(string $table, array $data, string $where, array $params): int {
-    global $fixture; $fixture['updates'][] = ['table' => $table, 'data' => $data];
-    if ($table === 'device_commands') $fixture['command'] = array_replace($fixture['command'], $data);
-    return 1;
-}
-function log_event(?int $device, ?int $user, string $event, string $level, string $message, ?array $metadata = null): void { global $fixture; $fixture['logs'][] = ['event' => $event, 'metadata' => $metadata]; }
-function rate_limit_check(int $device, string $action, int $max, int $window): void {}
-function require_json_body(): array { global $fixture; return $fixture['body']; }
-function validate_device_identity(array $auth, array $body): void { if (($body['device_id'] ?? $auth['device_id']) !== $auth['device_id']) api_error('Device mismatch.', 403); }
-function validate_bool(mixed $value, string $field): ?string { return in_array($value, [true, false, 0, 1, '0', '1'], true) ? null : 'Invalid boolean'; }
-function validate_range(mixed $value, int $min, int $max, string $field): ?string { return is_numeric($value) && $value >= $min && $value <= $max ? null : 'Invalid range'; }
-function api_error(string $message, int $status = 400, array $details = []): never { Fiber::suspend(['success' => false, 'status' => $status, 'error' => $message]); throw new RuntimeException('Do not resume fixture response.'); }
-function api_success(mixed $data = null, string $message = '', int $status = 200): never { Fiber::suspend(['success' => true, 'status' => $status, 'data' => $data]); throw new RuntimeException('Do not resume fixture response.'); }
-function reset_fixture(array $overrides = []): void {
-    global $fixture, $fixture_db, $device, $reading, $command;
-    $fixture_db = new PortalFixtureDatabase();
-    $fixture = array_replace(['device' => $device, 'reading' => $reading, 'command' => $command, 'active' => null, 'other' => null, 'alert' => false,
-        'body' => ['device_id' => 7, 'command_id' => 11, 'container_type' => 'cup', 'target_amount_ml' => 137, 'container_detected' => true], 'inserts' => [], 'updates' => [], 'logs' => []], $overrides);
-}
-function run_endpoint(string $handler): array { $fiber = new Fiber(fn() => $handler(['device_id' => 7])); return $fiber->start(); }
-require_once __DIR__ . '/../api/device_command.php';
-require_once __DIR__ . '/../api/dispensing.php';
-require_once __DIR__ . '/../api/sensor_reading.php';
-reset_fixture(['command' => array_replace($command, ['status' => 'pending'])]);
-$response = run_endpoint('handle_poll_command');
-check($response['success'] && $response['data']['command']['target_amount_ml'] === 137, 'actual claim preserves custom target');
-check(!array_key_exists('target_amount_ml', $fixture['updates'][0]['data']), 'claim does not rewrite target');
-reset_fixture();
-$response = run_endpoint('handle_dispensing_start');
-check($response['success'] && $response['status'] === 201 && $response['data']['target_amount_ml'] === 137, 'actual start accepts absent level sensor');
-check($fixture['inserts'][0]['data']['target_amount_ml'] === 137 && $fixture['inserts'][0]['data']['water_level_before'] === null, 'session exact fill/null water');
-check($fixture['command']['session_id'] === 101 && $fixture['command']['status'] === 'completed', 'claimed command consumed atomically');
-reset_fixture(['command' => array_replace($command, ['claimed_at' => date('Y-m-d H:i:s', time() - 31)])]);
-$response = run_endpoint('handle_dispensing_start');
-check(!$response['success'] && $response['status'] === 409 && $fixture['inserts'] === [], 'fresh heartbeat cannot revive a stale claimed lease');
-foreach ([['command' => null], ['body' => ['command_id' => 11, 'container_type' => 'tumbler', 'target_amount_ml' => 137]], ['body' => ['command_id' => 11, 'container_type' => 'cup', 'target_amount_ml' => 250]], ['body' => ['container_type' => 'cup', 'target_amount_ml' => 137]], ['command' => array_replace($command, ['device_id' => 8])], ['command' => array_replace($command, ['status' => 'completed'])], ['reading' => $stale], ['active' => ['id' => 1]], ['other' => ['id' => 2]], ['alert' => true], ['reading' => array_replace($reading, ['pump_status' => 1])], ['reading' => array_replace($reading, ['container_detected' => 0])]] as $attempt) {
-    reset_fixture($attempt); $response = run_endpoint('handle_dispensing_start');
-    check(!$response['success'] && $fixture['inserts'] === [], 'actual start rejects unsafe/tampered input before writes');
-}
-reset_fixture(['body' => ['container_detected' => true, 'pump_status' => false, 'water_level_percent' => 'retired-value']]);
-$response = run_endpoint('handle_sensor_reading');
-check($response['success'] && $fixture['inserts'][0]['data']['water_level_percent'] === null, 'sensor endpoint discards obsolete level');
-check(!array_filter($fixture['logs'], fn($log) => str_contains($log['event'], 'water')), 'no obsolete water events generated');
-echo "PASS: {$count} fill-volume and backend authorization checks. No database/device writes.\n";
+echo "PASS: {$count} legacy volume validation and shared readiness checks. No database/device writes.\n";

@@ -1,4 +1,5 @@
 <?php
+require_once __DIR__ . '/timer.php';
 /**
  * Execution Portal safety/configuration shared by the web and device API.
  * Settings stay in system_settings; public selections only change the session.
@@ -70,7 +71,7 @@ function portal_fresh_timestamp(?string $timestamp, int $timeout): bool
 
 function portal_telemetry_timeout(): int
 {
-    return max(1, portal_integer(get_setting('portal_telemetry_max_age_seconds', '30')) ?? 30);
+    return max(1, min(10, portal_integer(get_setting('portal_telemetry_max_age_seconds', '10')) ?? 10));
 }
 
 /** A sample from before session start cannot describe the pump/container now. */
@@ -87,16 +88,17 @@ function portal_safety_reason(?array $device, ?array $reading, ?array $active, ?
 {
     if (!$device) return 'No physical dispenser is registered.';
     if (($device['status'] ?? '') !== 'online') return ($device['status'] ?? '') === 'disabled' ? 'The dispenser is disabled.' : 'The dispenser is offline or unavailable.';
-    $timeout = max(1, portal_integer(get_setting('device_offline_timeout_seconds', '120')) ?? 120);
-    if (!portal_fresh_timestamp($device['last_seen_at'] ?? null, $timeout)) return 'The dispenser is offline.';
+    $timeout = 30;
+    if (!portal_fresh_timestamp($device['last_heartbeat_at'] ?? null, $timeout)) return 'The dispenser heartbeat is stale or unavailable.';
     if (!$reading || !portal_fresh_timestamp($reading['recorded_at'] ?? null, portal_telemetry_timeout())) return 'Fresh device telemetry is required before dispensing.';
+    if (!timer_sensor_valid($reading, $device)) return 'The container sensor is unavailable or has reported a fault.';
     if (isset($reading['device_id']) && (int)$reading['device_id'] !== (int)$device['id']) return 'Telemetry belongs to another device.';
     if ($safety_alert) return 'A device or sensor safety error blocks dispensing.';
     if ($active) return 'A dispensing operation is already active.';
     if ($queued) return 'A dispensing request is already queued or claimed.';
     if (!array_key_exists('pump_status', $reading) || !in_array($reading['pump_status'], [0, 1, '0', '1', false, true], true)) return 'Valid pump telemetry is required before dispensing.';
     if (!empty($reading['pump_status'])) return 'The physical pump is already running.';
-    if (empty($reading['container_detected']) && empty($reading['cup_detected'])) return 'Place a container on the dispenser tray first.';
+    if (empty($reading['container_detected'])) return 'Place a container on the dispenser tray first.';
     return null;
 }
 
@@ -183,6 +185,11 @@ function portal_recent_activities(?int $device_id, int $limit = 25): array
             $details .= ' Target: ' . (int)$match[1] . ' mL.';
         } elseif (preg_match('/measured\s+([0-9]+)mL/', $row['message'], $match)) {
             $details .= ' Measured: ' . (int)$match[1] . ' mL.';
+        }
+        if (is_array($metadata) && isset($metadata['duration_ms'])) {
+            $details = 'Configured time: ' . ((int)$metadata['duration_ms'] / 1000) . ' s; actual water volume not measured.';
+            if (isset($metadata['pump_elapsed_ms'])) $details .= ' Reported pump time: ' . ((int)$metadata['pump_elapsed_ms'] / 1000) . ' s.';
+            if (isset($metadata['stop_reason'])) $details .= ' ' . str_replace('_', ' ', (string)$metadata['stop_reason']) . '.';
         }
         if (in_array($row['event_level'], ['error','critical'], true)) $status = 'Error';
         $created_at = (string)($row['created_at'] ?? '');

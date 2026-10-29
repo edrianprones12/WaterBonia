@@ -1,132 +1,28 @@
 <?php
-/**
- * WaterBonia API - Sensor Reading Endpoint
- *
- * POST /api/device/sensor-reading
- *
- * Receives telemetry from ESP32 and stores it.
- * The installed sensors report container presence and measured fill, not reservoir level.
- */
-
-function handle_sensor_reading(array $auth): void
-{
-    rate_limit_check($auth['device_id'], 'sensor_reading', 60, 60);
-
-    $body = require_json_body();
-    validate_device_identity($auth, $body);
-
-    $device_id = $auth['device_id'];
-    $errors = [];
-
-    // Legacy level fields are ignored; new telemetry rows retain a null schema column.
-
-    // ── Validate battery_percent ──
-    if (array_key_exists('battery_percent', $body)) {
-        $bp = $body['battery_percent'];
-        if ($bp !== null && $bp !== '') {
-            $err = validate_range($bp, 0, 100, 'battery_percent');
-            if ($err) $errors['battery_percent'] = $err;
-            else $body['battery_percent'] = (int)$bp;
-        } else {
-            $body['battery_percent'] = null;
+/** No measured-volume or reservoir telemetry is accepted by the timer protocol. */
+function handle_sensor_reading(array $auth): void {
+    $body=require_json_body(); timer_require_protocol($body); validate_device_identity($auth,$body);
+    rate_limit_check($auth['device_id'],'sensor_reading',120,60);
+    $seq=portal_integer($body['report_sequence']??null); $health=$body['sensor_status']??null;
+    if(!$seq || !in_array($health,['ok','unavailable','fault'],true) || !is_bool($body['pump_status']??null)
+        || !array_key_exists('container_detected',$body) || ($health==='ok' ? !is_bool($body['container_detected']) : $body['container_detected']!==null)) api_error('Explicit sensor health, nullable presence, pump state and sequence required.',422);
+    $active=portal_integer($body['active_command_id']??0); $elapsed=portal_integer($body['pump_elapsed_ms']??0);
+    if($active===null || $elapsed===null || $elapsed>TIMER_HARD_MAX_MS+1000 || ($body['pump_status'] && (!$active || $health!=='ok' || !$body['container_detected']))) api_error('Invalid operation telemetry.',422);
+    try {
+        db()->beginTransaction(); $device=db_fetch('SELECT * FROM devices WHERE id=? FOR UPDATE',[$auth['device_id']]);
+        if(($body['boot_id']??null)!==($device['boot_id']??null) || !$device['boot_id'] || $seq<=(int)$device['report_sequence']) {db()->rollBack(); api_error('Old, duplicate or wrong-boot telemetry.',409);}
+        if($active) {
+            $command=db_fetch("SELECT * FROM device_commands WHERE id=? AND device_id=? AND status='running' AND claim_boot_id=?",[$active,$auth['device_id'],$device['boot_id']]);
+            if(!$command) {db()->rollBack(); api_error('Active command mismatch.',409);}
         }
-    }
-
-    // ── Validate booleans ──
-    foreach (['cup_detected', 'container_detected', 'hand_detected', 'pump_status'] as $field) {
-        if (array_key_exists($field, $body)) {
-            $err = validate_bool($body[$field], $field);
-            if ($err) $errors[$field] = $err;
-            else $body[$field] = (bool)$body[$field];
-        } else {
-            $body[$field] = false;
-        }
-    }
-
-    // ── Validate optional measured_ml (live load-cell reading) ──
-    $measured_ml = null;
-    if (array_key_exists('measured_ml', $body) && $body['measured_ml'] !== null && $body['measured_ml'] !== '') {
-        if (!is_numeric($body['measured_ml']) || (int)$body['measured_ml'] < 0) {
-            $errors['measured_ml'] = 'Must be a non-negative number.';
-        } else {
-            $measured_ml = (int)$body['measured_ml'];
-        }
-    }
-
-    if (!empty($errors)) {
-        api_error('Validation failed', 422, $errors);
-    }
-
-    // ── Container presence transition (log the change only) ──
-    $prev = db_fetch(
-        "SELECT container_detected, cup_detected FROM sensor_readings WHERE device_id = ? ORDER BY recorded_at DESC LIMIT 1",
-        [$device_id]
-    );
-    $present_now = !empty($body['container_detected']) || !empty($body['cup_detected']);
-
-    // ── Store the reading ──
-    $reading_id = db_insert('sensor_readings', [
-        'device_id'           => $device_id,
-        'water_level_percent' => null,
-        'cup_detected'        => $body['cup_detected'] ? 1 : 0,
-        'container_detected'  => $body['container_detected'] ? 1 : 0,
-        'hand_detected'       => $body['hand_detected'] ? 1 : 0,
-        'pump_status'         => $body['pump_status'] ? 1 : 0,
-        'battery_percent'     => $body['battery_percent'] ?? null,
-        'recorded_at'         => date('Y-m-d H:i:s'),
-    ]);
-
-    // Log a change only — and on the very first reading report presence if
-    // the tray is already occupied. Telemetry rows themselves are never logged.
-    if ($prev) {
-        $was_present = !empty($prev['container_detected']) || !empty($prev['cup_detected']);
-        $changed = $was_present !== $present_now;
-    } else {
-        $changed = $present_now;
-    }
-    if ($changed) {
-        log_event($device_id, null,
-            $present_now ? 'container_detected' : 'container_removed', 'info',
-            $present_now
-                ? 'Container detected on the dispenser tray.'
-                : 'Container removed from the dispenser tray.');
-    }
-
-    // ── Update device last_seen_at (log offline→online once) ──
-    $current_device = db_fetch("SELECT status, device_name FROM devices WHERE id = ?", [$device_id]);
-    $device_update = ['last_seen_at' => date('Y-m-d H:i:s')];
-    if ($current_device && in_array($current_device['status'], ['offline', 'maintenance'])) {
-        $device_update['status'] = 'online';
-    }
-    db_update('devices', $device_update, 'id = ?', [$device_id]);
-
-    if ($current_device && $current_device['status'] !== 'online') {
-        log_event($device_id, null, 'device_connected', 'info',
-            "Device {$current_device['device_name']} came online.");
-        db()->prepare(
-            "UPDATE alerts SET status = 'resolved', resolved_at = ?
-              WHERE device_id = ? AND alert_type = 'device_offline' AND status = 'active'"
-        )->execute([date('Y-m-d H:i:s'), $device_id]);
-    }
-
-    // ── Update active session with live measured amount ──
-    if ($measured_ml !== null) {
-        $active = db_fetch(
-            "SELECT id FROM dispensing_sessions WHERE device_id = ? AND status = 'started' LIMIT 1",
-            [$device_id]
-        );
-        if ($active) {
-            db_update('dispensing_sessions',
-                ['measured_amount_ml' => $measured_ml],
-                'id = ?', [$active['id']]);
-        }
-    }
-
-    // Telemetry itself is not written to the activity log: one row per
-    // reading would bury the production events. Only state changes are
-    // logged (container presence above). No absent water sensor is inferred.
-    api_success([
-        'reading_id' => $reading_id,
-        'recorded_at' => date('c'),
-    ], 'Sensor reading accepted.');
+        $prev=db_fetch('SELECT * FROM sensor_readings WHERE device_id=? ORDER BY recorded_at DESC,id DESC LIMIT 1',[$auth['device_id']]);
+        $present=$health==='ok' && $body['container_detected'];
+        $id=db_insert('sensor_readings',['device_id'=>$auth['device_id'],'water_level_percent'=>null,'cup_detected'=>$present?1:0,'container_detected'=>$health==='ok'?($present?1:0):null,
+            'hand_detected'=>0,'pump_status'=>$body['pump_status']?1:0,'battery_percent'=>null,'sensor_status'=>$health,'boot_id'=>$device['boot_id'],'report_sequence'=>$seq,
+            'active_command_id'=>$active?:null,'pump_elapsed_ms'=>$active?$elapsed:null,'recorded_at'=>date('Y-m-d H:i:s')]);
+        db_update('devices',['report_sequence'=>$seq,'last_seen_at'=>date('Y-m-d H:i:s')],'id=?',[$auth['device_id']]);
+        if($health==='ok' && (!$prev || $prev['sensor_status']!=='ok' || (bool)$prev['container_detected']!==$present)) log_event($auth['device_id'],null,$present?'container_detected':'container_removed','info',$present?'Container detected.':'No container detected.');
+        if($health!=='ok' && (!$prev || $prev['sensor_status']!==$health)) log_event($auth['device_id'],null,'sensor_error','error','IR sensor status: '.$health);
+        db()->commit(); api_success(['reading_id'=>$id,'recorded_at'=>date('c')]);
+    } catch(Throwable $e) {if(db()->inTransaction()) db()->rollBack(); api_error('Telemetry unavailable.',503);}
 }

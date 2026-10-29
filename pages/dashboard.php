@@ -7,7 +7,6 @@
  * Execution Portal: /pages/dispense.php
  */
 require_once __DIR__ . '/../includes/functions.php';
-require_login();
 
 $page_title = 'Dashboard';
 $device = get_active_device();
@@ -39,9 +38,6 @@ if ($device) {
 $live = get_live_dispenser_state($device);
 $availability = dispenser_availability($device, $live);
 
-// Demo Mode is announced, never simulated: the admin portal reports
-// real system state and only labels the presentation as a demo.
-$demo = WATERBONIA_DEMO_MODE;
 
 // Today's dispensing count
 $today = date('Y-m-d');
@@ -66,17 +62,7 @@ $recent_sessions = $device
 include __DIR__ . '/../includes/header.php';
 ?>
 
-<?php if ($demo): ?>
-<!-- Demo Mode label only — the Admin Portal is not an execution simulator -->
-<div class="demo-banner mb-3" id="demo-banner">
-    <span class="demo-banner-icon" aria-hidden="true">◈</span>
-    <span class="demo-banner-body">
-        <strong>DEMO MODE</strong>
-        <span>Simulation — No physical hardware connected</span>
-    </span>
-    <span class="demo-banner-tag">Presentation</span>
-</div>
-<?php endif; ?>
+
 
 <?php if (!$device): ?>
 <div class="dev-notice">

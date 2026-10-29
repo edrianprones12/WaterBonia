@@ -5,11 +5,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const source = fs.readFileSync(path.join(__dirname, '../assets/js/portal-navigation.js'), 'utf8');
-const sectionKeys = ['dispense-workflow', 'container-settings', 'led-card', 'activity-logs', 'safety-sequence', 'demo-card'];
+const sectionKeys = ['dispense-workflow', 'container-settings', 'led-card', 'activity-logs', 'safety-sequence'];
 const sectionTitles = {
     'dispense-workflow': 'Dispense Water', 'container-settings': 'Container Settings',
     'led-card': 'Device Status', 'activity-logs': 'Activity Logs',
-    'safety-sequence': 'Safety Sequence', 'demo-card': 'Demo Controls'
+    'safety-sequence': 'Safety Sequence'
 };
 
 class Node {
@@ -153,7 +153,7 @@ test('Selecting the current section keeps history unchanged and focuses it', () 
 test('Back and forward restore active navigation and toolbar without reloading or extra focus', () => {
     const env = fixture();
     env.link('activity-logs').click();
-    env.link('demo-card').click();
+    env.link('led-card').click();
     env.back(); assert.equal(env.active(), 'activity-logs');
     assert.deepEqual(env.visible(), ['activity-logs']);
     assert.equal(env.pageHeading.textContent, 'Activity Logs');

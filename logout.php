@@ -1,13 +1,4 @@
 <?php
+/** Compatibility URL: WaterBonia no longer uses human accounts. */
 require_once __DIR__ . '/includes/functions.php';
-
-if (logged_in()) {
-    log_event(null, $_SESSION['user_id'], 'user_logout', 'info', 'User logged out');
-}
-
-session_destroy();
-header('Cache-Control: no-cache, no-store, must-revalidate');
-header('Pragma: no-cache');
-header('Expires: 0');
-// Return to the primary dispensing experience after ending a session.
 redirect('/pages/dispense.php');

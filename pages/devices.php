@@ -4,7 +4,8 @@
  * Device provisioning + token management
  */
 require_once __DIR__ . '/../includes/functions.php';
-require_login();
+require_once __DIR__ . '/../api/auth.php';
+require_valid_csrf();
 
 $page_title = 'Devices';
 
@@ -14,10 +15,9 @@ $error = '';
 // ── Handle POST actions ─────────────────────────────────
 if (is_post() && verify_csrf()) {
     $form_action = $_POST['form_action'] ?? '';
-    $user = current_user();
 
     // ── Add new device ──
-    if ($form_action === 'add_device' && is_admin()) {
+    if ($form_action === 'add_device') {
         $device_code = trim($_POST['device_code'] ?? '');
         $device_name = trim($_POST['device_name'] ?? '');
         $location = trim($_POST['location'] ?? '');
@@ -40,15 +40,15 @@ if (is_post() && verify_csrf()) {
                     'firmware_version' => $firmware,
                     'status'           => 'offline',
                 ]);
-                log_event($new_id, $user['id'], 'device_registered', 'info',
-                    "Device {$device_code} ({$esp32_id}) registered by {$user['username']}");
+                log_event($new_id, null, 'device_registered', 'info',
+                    "Device {$device_code} ({$esp32_id}) registered through device management.");
                 $success = "Device \"{$device_code}\" registered successfully. You can now generate an API token for it.";
             }
         }
     }
 
     // ── Generate token ──
-    if ($form_action === 'generate_token' && can_edit()) {
+    if ($form_action === 'generate_token') {
         $target_device_id = (int)($_POST['device_id'] ?? 0);
         $token_name = trim($_POST['token_name'] ?? 'api-token');
 
@@ -61,7 +61,7 @@ if (is_post() && verify_csrf()) {
                 ->execute([$target_device_id]);
 
             $result = generate_device_token($target_device_id, $token_name);
-            log_event($target_device_id, $user['id'], 'device_token_created', 'info',
+            log_event($target_device_id, null, 'device_token_created', 'info',
                 "New API token generated for {$device['device_code']}.");
 
             // Pass token to view via session (shown only once)
@@ -76,7 +76,7 @@ if (is_post() && verify_csrf()) {
     }
 
     // ── Revoke token ──
-    if ($form_action === 'revoke_token' && can_edit()) {
+    if ($form_action === 'revoke_token') {
         $token_id = (int)($_POST['token_id'] ?? 0);
         $device_id_for_log = (int)($_POST['device_id_for_log'] ?? 0);
 
@@ -84,7 +84,7 @@ if (is_post() && verify_csrf()) {
             $revoked = revoke_device_token($token_id);
             if ($revoked) {
                 $device = db_fetch("SELECT device_code FROM devices WHERE id = ?", [$device_id_for_log]);
-                log_event($device_id_for_log, $user['id'], 'device_token_revoked', 'warning',
+                log_event($device_id_for_log, null, 'device_token_revoked', 'warning',
                     "API token revoked for " . ($device ? $device['device_code'] : 'device'));
                 $success = 'Token revoked successfully.';
             } else {
@@ -93,8 +93,8 @@ if (is_post() && verify_csrf()) {
         }
     }
 
-    // ── Delete device (admin only) ──
-    if ($form_action === 'delete_device' && is_admin()) {
+    // ── Delete device  ──
+    if ($form_action === 'delete_device') {
         $target_device_id = (int)($_POST['device_id'] ?? 0);
         $device = db_fetch("SELECT * FROM devices WHERE id = ?", [$target_device_id]);
         if ($device) {
@@ -107,8 +107,8 @@ if (is_post() && verify_csrf()) {
             } else {
                 db()->prepare("DELETE FROM device_tokens WHERE device_id = ?")->execute([$target_device_id]);
                 db()->prepare("DELETE FROM devices WHERE id = ?")->execute([$target_device_id]);
-                log_event(null, $user['id'], 'device_deleted', 'warning',
-                    "Device {$device['device_code']} deleted by {$user['username']}");
+                log_event(null, null, 'device_deleted', 'warning',
+                    "Device {$device['device_code']} deleted through device management.");
                 $success = 'Device deleted.';
             }
         }
@@ -195,8 +195,8 @@ include __DIR__ . '/../includes/header.php';
 </div>
 <?php endif; ?>
 
-<!-- Add Device Form (admin only) -->
-<?php if (is_admin()): ?>
+<!-- Add Device Form  -->
+
 <div class="card mb-3">
     <div class="card-header"><h3>Register New Device</h3></div>
     <div class="card-body">
@@ -231,7 +231,7 @@ include __DIR__ . '/../includes/header.php';
         </form>
     </div>
 </div>
-<?php endif; ?>
+
 
 <div class="card mb-3">
     <div class="card-header"><h3>Filter</h3></div>
@@ -304,7 +304,7 @@ include __DIR__ . '/../includes/header.php';
                                     <span class="text-sm" style="margin-left:0.3rem"><?= sanitize($t['token_name'] ?: 'default') ?></span>
                                     <span class="text-muted text-sm">(<?= time_ago($t['created_at']) ?>)</span>
                                 </div>
-                                <?php if (can_edit()): ?>
+
                                 <form method="POST" action="<?= base_url('/pages/devices.php') ?>" style="display:inline" onsubmit="return confirm('Revoke this token? The device will stop working until a new token is generated.')">
                                     <?= csrf_field() ?>
                                     <input type="hidden" name="form_action" value="revoke_token">
@@ -312,7 +312,7 @@ include __DIR__ . '/../includes/header.php';
                                     <input type="hidden" name="device_id_for_log" value="<?= $d['id'] ?>">
                                     <button type="submit" class="btn btn-sm btn-danger">Revoke</button>
                                 </form>
-                                <?php endif; ?>
+
                             </div>
                             <?php endforeach; ?>
                             <?php foreach ($other_tokens as $t): ?>
@@ -326,7 +326,7 @@ include __DIR__ . '/../includes/header.php';
                             <?php endforeach; ?>
                         <?php endif; ?>
 
-                        <?php if (can_edit()): ?>
+
                         <div style="margin-top:0.5rem">
                             <form method="POST" action="<?= base_url('/pages/devices.php') ?>" style="display:flex;gap:0.4rem;align-items:end">
                                 <?= csrf_field() ?>
@@ -336,10 +336,10 @@ include __DIR__ . '/../includes/header.php';
                                 <button type="submit" class="btn btn-sm btn-primary" onclick="return confirm('Generate a new token? Any existing active token will be revoked.')">Generate Token</button>
                             </form>
                         </div>
-                        <?php endif; ?>
+
                     </div>
 
-                    <?php if (is_admin()): ?>
+
                     <div style="min-width:80px;text-align:right">
                         <form method="POST" action="<?= base_url('/pages/devices.php') ?>" onsubmit="return confirm('Delete this device? This cannot be undone.')">
                             <?= csrf_field() ?>
@@ -348,7 +348,7 @@ include __DIR__ . '/../includes/header.php';
                             <button type="submit" class="btn btn-sm btn-danger">Delete</button>
                         </form>
                     </div>
-                    <?php endif; ?>
+
                 </div>
             </div>
             <?php endforeach; ?>
